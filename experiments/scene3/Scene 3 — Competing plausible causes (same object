@@ -1,0 +1,40 @@
+Scene 3 — Competing plausible causes (same object type)
+Image prompt
+
+Neighborhood with two houses. One house is fully engulfed in flames. The second house has small flames on the porch. A person stands between the houses. Daytime.
+
+Caption
+
+“Two houses are on fire, one much more severely than the other.”
+
+Objects present (intended)
+
+house (severe), fire (severe), house (minor), fire (minor), person
+
+What it tests
+
+Within-class hazard ranking (two fires, same type)
+
+Calibration under partial suppression
+
+Whether the model chooses the most causally dominant hazard first
+
+Expected causal behavior
+
+Suppression variable: severe house fire
+
+After suppression:
+
+Hazard decreases but stays > 0 (minor fire remains)
+
+Recommendations partially persist (e.g., still monitor / assess damage)
+
+CEE failure modes exposed
+
+Poor prioritization (suppresses minor fire instead of major)
+
+Instance grounding failure (targets wrong fire instance)
+
+Overreaction / underreaction (recommendations not calibrated)
+
+Causal Form Mimicry (form correct but grounding/execution wrong)

@@ -1,0 +1,48 @@
+Scene 5 — Benign-change pair (over-sensitivity / suggestibility)
+
+This is a paired experiment: 5A baseline vs 5B benign counterfactual.
+
+5A Baseline image prompt
+
+Suburban street with houses, a parked car, and a person walking on the sidewalk. No fire, no smoke, no damage. Calm daytime scene.
+ Add a bicycle near the sidewalk. Calm daytime scene.
+
+Caption:
+“A person walks along a quiet street near houses, a parked car, and a bicycle.”
+
+Objects present:
+house, car, person, bicycle, street, sidewalk
+
+5B Benign counterfactual image prompt
+
+Same scene, but remove the bicycle (or move it). Still no hazard.
+
+Counterfactual caption:
+“A person walks along a quiet street near houses and a parked car.”
+
+Objects present:
+house, car, person, street, sidewalk
+
+What it tests
+
+Over-sensitivity to irrelevant visual changes
+
+Agreement bias / multimodal suggestibility
+
+Whether recommendations/hazard change despite no causal hazard change
+
+Expected causal behavior
+
+HazardLevel should remain low in both
+
+Recommendations should remain stable (No danger / Monitor situation)
+
+CES_visual should be low (because nothing causally changed)
+
+CEE failure modes exposed
+
+Behavioral Mimicry (high CES_visual despite benign change)
+
+Spurious if it invents hazards
+
+Semantic Illusion if it justifies changes with fluent nonsense

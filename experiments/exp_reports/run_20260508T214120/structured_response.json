@@ -1,0 +1,297 @@
+{
+  "exported_at": "2026-05-08T21-43-10",
+  "run_id": "run_20260508T214120",
+  "model": "qwen2.5vl:7b",
+  "image_filename": "15.jpg",
+  "prompt": "Analyze the uploaded image and caption.\n\n## Definitions\n\n- THREAT: a detected entity currently in a hazard-bearing state. It is the source of harm. Example: house_1 with state `burning`. Populates the `threat` slot of every recommendation quad and appears in the `threats` block.\n- DANGER: the condition of being exposed to harm. Applies to entities on the receiving end. A person near a burning house is in danger, not \"a risk\". Represented as the `affected_object` slot of a quad; these entities do not need their own block.\n- LATENT THREAT: a detected entity currently in a normal state, positioned so it could flip into a hazard-bearing state if the scene evolves (e.g. a sealed propane tank next to a fire). Current state is normal, so it is NOT a threat yet. Represented as a quad edge with `effect = increases_risk_to` from the active hazard to the latent entity.\n- REMAINING_RISK: a per-recommendation prose field describing what this specific action leaves unaddressed. Can reference active threats, latent threats, or entities still in danger.\n\nThe word \"risk\" as a standalone category does not appear in the schema; use the concept above that actually applies.\n\n## State vocabulary\n\nEvery detected object has a `state` \u2014 a single lowercase adjective or participle describing its current condition. Pick from the lists below. If nothing fits, you may introduce a new single-word adjective provided you can name its non-hazardous counterpart.\n\nHazard-bearing states (threat-producing):\n  burning, collapsed, collapsing, fallen, crushed, flooded, leaking,\n  bleeding, injured, approaching, charging, aiming, coiled, rabid,\n  armed, fleeing, striking, rising, spreading, billowing, seeping,\n  escalating\n\nNormal states:\n  intact, standing, upright, whole, dry, sealed, uninjured, healthy,\n  stationary, resting, disengaged, relaxed, unarmed, stable, contained,\n  dissipating, steady\n\nAn object in a hazard-bearing state appears in `threats`. An object in a normal state does not.\n\n## Effect vocabulary (truth conditions)\n\nEach recommendation quad uses exactly one `effect` label. Pick the MOST SPECIFIC applicable label. `threatens` is a last resort \u2014 use only when no other label applies AND the danger is proximate and unavoidable.\n\n- may_spread_to      \u2014 hazard can propagate via physical contiguity (fire, flood, disease)\n- may_harm           \u2014 threat can injure the affected entity, which does not itself become a hazard\n- blocks_access_to   \u2014 physical obstruction preventing reach\n- isolates           \u2014 cuts an entity off from escape or resources\n- exposes            \u2014 protective barrier removed or breached\n- increases_risk_to  \u2014 enabling factor; makes another hazard worse or converts a normal entity into a latent threat\n- worsens            \u2014 escalates a hazard already present on the SAME entity\n- threatens          \u2014 last resort (see above)\n\n## Causal quad\n\nEach recommendation commits to a four-part structure:\n\n  (threat, state, effect, affected_objects)\n\n`affected_objects` is a LIST of object_ids \u2014 use a list with one element when only one entity is affected, or multiple elements when one (threat, state) with the same effect threatens several entities at once. Example: a single burning house threatening two nearby people becomes one recommendation with `affected_objects: [\"person_1\", \"person_2\"]`, not two near-duplicate recommendations.\n\nPlain-English template for the `reason` field:\n  \"Because {threat} is {state}, it {effect} {affected_objects}.\"\n(write the affected_objects naturally, e.g. \"person_1 and person_2\".)\n\nYou may rephrase for fluency, but every object_id and state word in the quad must appear in the reason, and vice versa. Every object_id in `affected_objects` must be mentioned in the reason.\n\n## Reasoning context\n\nWhen generating recommendations, consider the full scene: every detected_object, every declared threat, and the spatial relationships visible in the image. Surface entities in normal states whose proximity to active threats makes them latent threats. Rank recommendations by weighing life-safety, cascade potential, imminence, and hazard containment together.\n{INFERRED_ENTITIES_BLOCK}\n\n## Worked example (format only \u2014 do not copy its content)\n\nScene: a tree has fallen on a parked car; one person stands nearby; a sealed gas canister sits between them.\n\n\"detected_objects\": [\n  {\"object_id\": \"tree_1\",     \"label\": \"tree\",     \"state\": \"fallen\",     \"bbox\": [10, 40, 300, 400]},\n  {\"object_id\": \"car_1\",      \"label\": \"car\",      \"state\": \"crushed\",    \"bbox\": [120, 260, 340, 420]},\n  {\"object_id\": \"person_1\",   \"label\": \"person\",   \"state\": \"stationary\", \"bbox\": [360, 200, 420, 440]},\n  {\"object_id\": \"canister_1\", \"label\": \"canister\", \"state\": \"sealed\",     \"bbox\": [300, 380, 340, 420]}\n]\n\"threats\": [\n  {\"object_id\": \"tree_1\", \"state\": \"fallen\",\n   \"reason\": \"tree_1 has fallen onto car_1 and may shift toward person_1.\"},\n  {\"object_id\": \"car_1\",  \"state\": \"crushed\",\n   \"reason\": \"car_1 is crushed under tree_1; structural integrity is compromised.\"}\n]\n\"recommendations\": [\n  {\"rank\": 1,\n   \"action\": \"Move person_1 away from tree_1.\",\n   \"reason\": \"Because tree_1 is fallen, it may_harm person_1 if it shifts further.\",\n   \"related_object_ids\": [\"tree_1\", \"person_1\"],\n   \"structured_reasoning\": {\n     \"threat\": \"tree_1\", \"state\": \"fallen\",\n     \"effect\": \"may_harm\", \"affected_objects\": [\"person_1\"]\n   },\n   \"expected_consequence\": \"person_1 is out of tree_1's fall radius.\",\n   \"remaining_risk\": \"(car_1, crushed) is not addressed; canister_1 remains a latent threat if tree_1 shifts onto it.\",\n   \"possible_follow_up_action\": \"Stabilize tree_1 before approaching car_1.\"},\n  {\"rank\": 2,\n   \"action\": \"Clear canister_1 from beneath tree_1.\",\n   \"reason\": \"Because tree_1 is fallen, it increases_risk_to canister_1, which could rupture if tree_1 shifts.\",\n   \"related_object_ids\": [\"tree_1\", \"canister_1\"],\n   \"structured_reasoning\": {\n     \"threat\": \"tree_1\", \"state\": \"fallen\",\n     \"effect\": \"increases_risk_to\", \"affected_objects\": [\"canister_1\"]\n   },\n   \"expected_consequence\": \"canister_1 is removed from tree_1's fall radius.\",\n   \"remaining_risk\": \"(car_1, crushed) hazard is not addressed by this action.\",\n   \"possible_follow_up_action\": \"Inspect canister_1 for damage before storing.\"}\n]\n\nEnd of example. Notes: (1) canister_1 is a LATENT THREAT \u2014 it appears as an affected_object via `increases_risk_to`, not in the `threats` block, because its own state (`sealed`) is normal. (2) `affected_objects` is a list even when only one entity is affected (single-element list). When a single (threat, state, effect) reaches multiple entities \u2014 e.g., a burning house threatening person_1 and person_2 \u2014 emit ONE recommendation with `affected_objects: [\"person_1\", \"person_2\"]`, not multiple near-duplicate recommendations.\n\n## Output schema\n\nReturn valid JSON with exactly these keys:\n\n- scene_summary: one short sentence describing the scene as a whole.\n- key_observations: array of short strings describing what you SEE in the scene directly. Use object_ids. Example: \"person_1 is facing away from tree_1.\"\n- assumptions: array of short strings describing what you INFER beyond the direct visual evidence. Use object_ids. Example: \"person_1 appears uninjured based on posture, though hidden injuries are possible.\"\n- uncertainty_notes: array of short strings describing what you are UNSURE about and why. Use object_ids. Example: \"Unclear whether tree_1 is still rooted or fully detached at its base.\"\n- detected_objects: array of:\n  - object_id: REQUIRED string of the form \"<label>_<N>\", where N is 1-indexed per label. Always use \"_1\" even when only one instance. Do not omit this field.\n  - label: singular lowercase noun. Use the MOST SPECIFIC applicable label when sex/age/species is visually apparent: prefer \"man\", \"woman\", \"child\", \"boy\", \"girl\" over generic \"person\"; prefer \"dog\", \"cat\", \"snake\", \"tiger\" over generic \"animal\". Use generic categories only when the specific category cannot be determined from the image. The chosen label propagates into object_id (e.g. \"man_1\", \"dog_1\").\n  - state: REQUIRED, single lowercase adjective or participle from the state vocabulary above (or a compliant extension).\n  - bbox: [x_min, y_min, x_max, y_max] in pixel coordinates\n- disaster_scenario: \"Yes\" or \"No\"\n- disaster_type: string\n- disaster_level: integer 0\u201310 (reserve 10 for truly catastrophic; calibrate)\n- threats: array of objects with:\n  - object_id: REQUIRED, must appear verbatim in detected_objects\n  - state: REQUIRED, must match that object's state in detected_objects AND must be a hazard-bearing state\n  - reason: short explanation using object_ids\n- recommendations: array with one entry per distinct (threat, state) causal logic you are acting on. Do NOT pad to a fixed count.\n  - rank: integer (1 = highest priority)\n  - action: one specific responder action (no \"and\"/\"then\" compounds)\n  - reason: plain English following the template above; every object_id named must use object_id form, never a bare label or plural.\n  - related_object_ids: array of object_id strings, each appearing verbatim in detected_objects.\n  - structured_reasoning (the causal quad):\n    - threat:           object_id of the entity whose state drives the hazard\n    - state:            hazard-bearing state of threat, matching the `threats` block\n    - effect:           one of the 8 effect labels above\n    - affected_objects: NON-EMPTY LIST of object_ids of impacted entities. Use a single-element list when only one entity is affected. Use multiple elements when one (threat, state, effect) reaches several entities together.\n  - expected_consequence: immediate result of THIS action if it succeeds \u2014 not a downstream effect of a different recommendation\n  - remaining_risk: must cite at least one (object_id, state) pair from the scene that this action does NOT address. Must differ across recommendations.\n  - possible_follow_up_action: string\n\n## Rules (all must hold)\n\n1. Bbox dedup: if two bounding boxes overlap by more than 80% of either box's area, they refer to the same physical object \u2014 emit only one detected_objects entry.\n2. detected_objects is the single source of truth for object_ids AND states. Any object_id or state used elsewhere in the JSON must match detected_objects verbatim.\n3. Never refer to a scene entity by a bare label, a category, or a plural noun outside `label` itself. \"man\", \"residents\", \"structures\", \"the car\", \"the houses\" are all INVALID. Use object_ids.\n4. Coverage: in each recommendation, every object_id in `reason` must appear in `related_object_ids` AND in the quad (as `threat` or in `affected_objects`); and every object_id in the quad \u2014 including every entry of `affected_objects` \u2014 must appear in `reason`.\n5. One recommendation per distinct (threat, state) causal logic. Two recommendations may NOT share all four quad slots (compare `affected_objects` as a SET \u2014 order does not matter), and may NOT have actions that collapse to the same (verb, target) pair. If two would-be recommendations share (threat, state, effect) and just differ in which single entity each affects, MERGE them into one recommendation with both entities in `affected_objects`.\n6. Self-reference: `threat` must NOT appear in its own `affected_objects` list with effect `threatens` or `may_harm` (those are already implied by the hazard-bearing state). Use `worsens` for self-escalation, or express the impact on different entities.\n7. If disaster_scenario is \"Yes\", `threats` must be non-empty, and every `structured_reasoning.state` must match the state of its `threat` in the `threats` block.\n8. If disaster_scenario is \"No\", set disaster_type to \"N/A\", disaster_level to 0, and both `threats` and `recommendations` to empty arrays.\n\n## Before returning \u2014 self-check\n\nVerify:\n(a) every object_id used anywhere in the JSON appears verbatim in detected_objects\n(b) every `state` value is in the state vocabulary or a single-word adjective with a named non-hazardous counterpart\n(c) every `effect` value is one of the 8 labels\n(d) no quad has `threat` in its own `affected_objects` list with effect `threatens` or `may_harm`\n(e) no two recommendations share all four quad slots (compare `affected_objects` as an unordered set)\n(f) no two recommendations share an identical `remaining_risk`\n(g) `threatens` is used only when no more specific effect applies\n(h) every detected_object in a hazard-bearing state appears in `threats`; every detected_object in a normal state does not\n(i) no two recommendations have identical or near-identical values in `action` or `expected_consequence`\n\nReturn valid JSON only.\n",
+  "caption": "A person in a rubble after fire",
+  "structured_response": {
+    "run_id": "run_20260508T214120",
+    "image_filename": "15.jpg",
+    "scene_summary": "A person is sitting amidst the rubble of a burned-down structure.",
+    "key_observations": [
+      "person_1 is wearing a pink shirt and a respirator mask.",
+      "The structure is heavily damaged and appears to have been destroyed by fire.",
+      "Debris and charred materials are scattered around the area."
+    ],
+    "assumptions": [
+      "The person is likely searching for something or assessing the damage.",
+      "The fire was likely the cause of the destruction."
+    ],
+    "uncertainty_notes": [
+      "The extent of the fire damage is not fully visible.",
+      "The person's emotional state is not clear from the image."
+    ],
+    "detected_objects": [
+      {
+        "object_id": "person_1",
+        "label": "person",
+        "state": "stationary",
+        "bbox": [
+          497,
+          472,
+          637,
+          705
+        ]
+      }
+    ],
+    "disaster_scenario": "Yes",
+    "disaster_type": "Fire",
+    "disaster_level": 8,
+    "threats": [
+      {
+        "object_id": "structure_1",
+        "label": "Unknown",
+        "state": "burned",
+        "bbox": null,
+        "reason": "The structure is heavily damaged and appears to have been destroyed by fire.",
+        "ungrounded": true
+      }
+    ],
+    "recommendations": [
+      {
+        "rank": 1,
+        "action": "Ensure the person's safety and provide immediate medical attention if needed.",
+        "reason": "Because the structure is burned, it may_harm person_1 if it shifts or collapses.",
+        "related_object_ids": [
+          "structure_1",
+          "person_1"
+        ],
+        "structured_reasoning": {
+          "threat": "structure_1",
+          "state": "burned",
+          "effect": "may_harm",
+          "affected_objects": [
+            "person_1"
+          ]
+        },
+        "expected_consequence": "person_1 is out of the immediate danger zone.",
+        "remaining_risk": "(structure_1, burned) hazard is not addressed; debris and other hazards remain.",
+        "possible_follow_up_action": "Secure the area and prevent further collapse."
+      }
+    ],
+    "causal_graph": {
+      "nodes": [
+        {
+          "id": "person_1",
+          "label": "person",
+          "state": "stationary",
+          "hazardous": false,
+          "inferred": false
+        }
+      ],
+      "edges": [
+        {
+          "source": "structure_1",
+          "target": "person_1",
+          "effect": "may_harm",
+          "via_state": "burned",
+          "from_recommendation_rank": 1,
+          "valid": false,
+          "target_inferred": false
+        }
+      ],
+      "intervention_candidates": [
+        {
+          "threat": "structure_1",
+          "state": "burned",
+          "outgoing_edge_count": 1
+        }
+      ],
+      "orphan_threats": [],
+      "threat_reasoning_coverage": 1.0,
+      "graph_warnings": [
+        "rec rank=1 threat 'structure_1' not in detected_objects"
+      ]
+    },
+    "graph_b": {
+      "nodes": [
+        {
+          "id": "person_1",
+          "label": "person",
+          "state": "stationary",
+          "hazardous": false,
+          "inferred": false
+        },
+        {
+          "id": "structure_1",
+          "label": "structure",
+          "state": "burned",
+          "hazardous": true,
+          "inferred": false
+        }
+      ],
+      "edges": [
+        {
+          "source": "structure_1",
+          "target": "person_1",
+          "effect": "blocks_access_to",
+          "via_state": "burned",
+          "valid": true
+        }
+      ],
+      "suppression_pick": {
+        "threat": "structure_1",
+        "state": "burned",
+        "reason": "Removing the burning structure will clear the immediate threat to the person and prevent further hazards from spreading."
+      },
+      "intervention_candidates": [
+        {
+          "threat": "structure_1",
+          "state": "burned",
+          "outgoing_edge_count": 1
+        }
+      ],
+      "orphan_threats": [],
+      "threat_reasoning_coverage": 1.0
+    },
+    "graph_consistency": {
+      "node_diff": {
+        "only_in_a": [],
+        "only_in_b": [],
+        "in_both": [
+          "person_1",
+          "structure_1"
+        ]
+      },
+      "edge_diff": {
+        "only_in_a": [
+          {
+            "source": "structure_1",
+            "target": "person_1",
+            "effect": "may_harm",
+            "via_state": "burned",
+            "from_recommendation_rank": 1,
+            "valid": false,
+            "target_inferred": false
+          }
+        ],
+        "only_in_b": [
+          {
+            "source": "structure_1",
+            "target": "person_1",
+            "effect": "blocks_access_to",
+            "via_state": "burned",
+            "valid": true
+          }
+        ],
+        "in_both": []
+      },
+      "effect_disagreements": [
+        {
+          "source": "structure_1",
+          "target": "person_1",
+          "graph_a_effects": [
+            "may_harm"
+          ],
+          "graph_b_effects": [
+            "blocks_access_to"
+          ]
+        }
+      ],
+      "flag_agreement": [
+        {
+          "id": "person_1",
+          "graph_a": false,
+          "graph_b": false,
+          "agree": true
+        },
+        {
+          "id": "structure_1",
+          "graph_a": false,
+          "graph_b": true,
+          "agree": false
+        }
+      ],
+      "structural_consistency": 0.0,
+      "topological_consistency": 1.0,
+      "node_consistency": 1.0,
+      "flag_consistency": 0.5,
+      "a_fidelity": 0.0,
+      "b_coverage": 0.0
+    },
+    "pre_internal_alignment": {
+      "score": 0.625,
+      "passed_checks": 10,
+      "failed_checks": 6,
+      "failures": [
+        {
+          "type": "threat_missing_detected_object",
+          "message": "Threat structure_1 is not present in detected_objects.",
+          "object_id": "structure_1"
+        },
+        {
+          "type": "threat_state_not_hazard_bearing",
+          "message": "Threat structure_1 uses non-hazard-bearing state 'burned'.",
+          "object_id": "structure_1",
+          "state": "burned"
+        },
+        {
+          "type": "related_object_missing_detected_object",
+          "message": "Recommendation 1 related_object_id 'structure_1' is not in detected_objects.",
+          "recommendation_rank": 1,
+          "object_id": "structure_1"
+        },
+        {
+          "type": "quad_ids_missing_from_reason",
+          "message": "Recommendation 1 reason does not mention every object_id in its quad.",
+          "recommendation_rank": 1,
+          "missing": [
+            "structure_1"
+          ]
+        },
+        {
+          "type": "remaining_risk_object_missing_detected_object",
+          "message": "Recommendation 1 remaining_risk cites unknown object 'structure_1'.",
+          "recommendation_rank": 1,
+          "object_id": "structure_1"
+        },
+        {
+          "type": "invalid_graph_edge",
+          "message": "Graph A has unresolved edge structure_1 -> person_1.",
+          "source": "structure_1",
+          "target": "person_1",
+          "effect": "may_harm",
+          "from_recommendation_rank": 1
+        }
+      ],
+      "allow_inferred": false
+    },
+    "pre_intervention_trust": {
+      "level": "low",
+      "score": 0.45,
+      "summary": "Baseline trust is low: the baseline causal account is unstable, so intervention shifts should be treated as weak evidence. The main limitation is grounding: Graph A includes targets not present in detected_objects. A post-intervention shift should be downweighted unless the post output becomes substantially more coherent.",
+      "interpretation": "Post-intervention shifts are hard to attribute to grounded causal reasoning.",
+      "qualifiers": [
+        "Graph A contains 1 invalid edge(s).",
+        "A fidelity is low: recommendation edges are weakly supported by Graph B.",
+        "B edge coverage is low: independent causal links are missing from recommendations.",
+        "A/B agree on some causal links but disagree on effect labels."
+      ],
+      "use_in_shift_scoring": "downweight",
+      "components": {
+        "internal_alignment": 0.625,
+        "structural_consistency": 0.0,
+        "topological_consistency": 1.0,
+        "node_consistency": 1.0,
+        "flag_consistency": 0.5,
+        "a_fidelity": 0.0,
+        "b_edge_coverage": 0.0,
+        "effect_disagreement_count": 1,
+        "graph_a_coverage": 1.0,
+        "graph_b_coverage": 1.0
+      },
+      "score_formula": "0.40*Internal + 0.20*A fidelity + 0.20*B edge coverage + 0.20*Avg(Graph A/B threat coverage)"
+    },
+    "framework_suppression_picks": [
+      {
+        "rank": 1,
+        "threat": "structure_1",
+        "state": "burned",
+        "outgoing_edge_count": 1,
+        "rationale": "outgoing_edges=1"
+      }
+    ],
+    "allow_inferred": false
+  }
+}

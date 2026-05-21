@@ -1,0 +1,251 @@
+
+
+🔷 CEE+ — Controlled Causal Evaluation Engine (Next Version)
+🎯 Goal
+Measure causal groundedness of a VLM by testing whether:
+* it identifies the true causal factors
+* it updates reasoning structure after intervention
+* it adapts recommendations accordingly
+CEE+ moves beyond just hazard sensitivity and evaluates:
+intervention → reasoning change → decision change
+
+🔷 Core Idea
+Replace taxonomy-heavy classification with:
+1. Continuous CEE+ Score
+Measures overall causal groundedness
+2. Signal-Level Explanations
+Explains why the model is grounded or not
+
+🔷 Core Signals
+CEE+ evaluates six key signals:
+1. Hazard Shift
+Does perceived risk change after intervention?
+
+2. Causal Graph Shift
+Does the model update its reasoning structure?
+Measured via:
+* edge changes
+* node changes
+* suppression variable consistency
+
+3. Recommendation Shift
+Do suggested actions change?
+Measured via:
+* added actions
+* removed actions
+* unchanged actions
+
+4. Structural Alignment
+Does the reasoning follow a valid causal chain?
+(hazard → action via suppression variable)
+
+5. Semantic Alignment
+Are reasoning and actions semantically consistent?
+(Ollama / judge model)
+
+6. Cross-Modal Consistency
+Do visual and language interventions agree?
+
+🔷 Final Output
+1. CEE+ Score
+A combined score from all signals.
+
+2. Groundedness Level
+Simple 3-level classification:
+* Causally grounded
+* Mildly causally grounded
+* Not causally grounded
+(no complex taxonomy)
+
+3. Signal Explanation (Key Contribution)
+Instead of labels, provide explanation:
+Example:
+CEE+ Score: 0.42 → Mildly causally grounded
+
+Explanation:
+- Hazard shift: high (8 → 3)
+- Graph shift: low (structure mostly unchanged)
+- Recommendation shift: moderate (1/3 actions changed)
+- Cross-modal consistency: weak
+
+Interpretation:
+The model reacts to intervention but does not significantly update its causal reasoning structure.
+
+🔷 CEE+ Pipeline
+Step 1 — Baseline Analysis
+Input:
+* image
+* caption
+Output:
+* detected entities
+* state grounding (e.g., fire_on_house_1)
+* hazard score
+* recommendations
+* causal graph
+* suppression variable
+
+Step 2 — Single Suppression Intervention
+Apply intervention on:
+hazardous state node (e.g., fire_on_house_1)
+Types:
+* visual
+* language
+* joint
+
+Step 3 — Post-Intervention Analysis
+Recompute:
+* hazard score
+* recommendations
+* causal graph
+
+Step 4 — Compute Signals
+For each intervention:
+* hazard shift
+* graph shift
+* recommendation shift
+* structural alignment
+* semantic alignment
+* cross-modal consistency
+
+Step 5 — Aggregate Score + Explanation
+Output:
+* CEE+ score
+* groundedness level
+* signal-level explanation
+
+🔷 Stage 1 (Paper 1 — Single Suppression)
+Scope
+Single suppression variable per scene.
+
+Must Implement
+1. Causal Graph Visualization
+* baseline graph
+* post-intervention graph
+* side-by-side comparison
+
+2. Graph Shift
+* edge differences
+* node differences
+* suppression variable consistency
+
+3. Recommendation Shift
+* set difference
+* added / removed / unchanged actions
+
+4. Hazard Shift (existing)
+
+5. Unified Shift Panel (UI)
+Hazard: 8 → 4
+Graph Shift: 0.42
+Recommendation Shift: 0.67
+
+Light Extension
+Progressive Multi-Modal Counterfactuals
+Test:
+action → consequence → next state → next recommendation
+
+🔷 Stage 2 (Paper 2 — Multi Suppression)
+Extension
+Multiple candidate suppression variables:
+fire_on_house_1
+fire_on_house_2
+person_near_fire
+
+Pipeline
+rank candidates → run CEE+ for each → compare shifts
+
+New Capability
+Comparative causal analysis
+Example:
+Suppress fire_on_house_1 → large hazard drop
+Suppress smoke_only → small change
+→ identifies true causal drivers
+
+Graph-Conditioned Recommendation Ablation
+Question:
+If we force explicit causal structure first, do recommendations improve?
+
+Pipeline:
+scene → causal graph → recommendations + quads
+
+Purpose:
+Compare direct recommendations against graph-conditioned recommendations.
+This should be treated as an ablation / repair condition, not the main CEE+
+evaluation pipeline, because the primary goal is to verify whether direct VLM
+recommendations are causally grounded.
+
+🔷 Stage 3 (Future)
+Progressive Counterfactual Reasoning (Full)
+Simulate:
+action → scene evolution → new hazards → new decisions
+This becomes causal consequence modeling.
+
+🔷 Causal Graph Design (Final Decision)
+Nodes
+Entities
+house_1, car_1, person_1
+States (key innovation)
+fire_on_house_1
+smoke_near_house_1
+person_1_near_fire
+System
+hazard_level
+Actions
+evacuate, call_fire_department
+
+Rule
+suppression variable = hazardous state
+NOT entity.
+
+🔷 Architecture
+Controlled Agentic Engine
+Modules:
+1. baseline reasoning agent
+2. intervention planner agent
+3. post-intervention reasoning agent
+4. shift evaluator (code)
+5. orchestrator
+
+🔷 UI Flow
+INPUT
+↓
+BASELINE (graph + outputs)
+↓
+INTERVENTION COMPARISON (side-by-side)
+↓
+SHIFT PANEL
+    - hazard shift
+    - graph shift
+    - recommendation shift
+↓
+EXPLANATION PANEL
+↓
+(PROGRESSIVE PANEL optional)
+
+🔷 Intern Scope (2.5 months)
+Minimum Success
+* graph visualization (baseline + intervention)
+* graph shift computation
+* recommendation shift computation
+
+Good Success
+* side-by-side comparison UI
+* unified shift summary panel
+
+Stretch
+* progressive counterfactual visualization
+   What you cannot claim from the baseline VLM alone:
+* that the recommendation is truly causally correct and the model understands the causes
+* that the reasoning explanation reflects the real internal mechanism
+* that following the recommendation would actually improve the situation. The model understands the consequences of the actions. 
+   
+🔷 Key Philosophy
+CEE+ is not just evaluation.
+It is:
+a causal stress test for model reasoning
+It checks whether the model:
+* understands causes
+* updates reasoning under intervention (for consequence understanding )
+* adapts decisions accordingly (for consequence understanding )
+* Counterfactuals and intervention take care of those things. 
+* Even when a VLM provides coherent threat identification, recommendations, and reasoning, the reasoning remains declarative rather than mechanistically verified. CEE+ is introduced not merely to catch obvious failures, but to expose causal structure explicitly and enable intervention-based transparency for safety-critical decision support

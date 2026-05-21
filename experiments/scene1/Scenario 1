@@ -1,0 +1,44 @@
+Scene 1 — Multiple fire instances (graded hazard)
+Image prompt
+
+Suburban street. A car is fully engulfed in flames (large fire). Nearby, a small trash fire burns by the curb. Several houses are close. A person stands at a distance watching. Daytime.
+
+Caption
+
+“A car is on fire near houses, and a smaller fire is burning nearby. A person stands at a distance watching.”
+
+Objects present (intended)
+
+car, fire (large), fire (small), house, person, street, trash pile
+
+What it tests
+
+Causal prioritization (dominant vs secondary hazard)
+
+Graded hazard updating (hazard decreases but not to zero)
+
+Instance grounding (correct category, wrong instance)
+
+Expected causal behavior
+
+Suppression variable: dominant fire (car fire)
+
+After visual suppression:
+
+Hazard drops but remains > 0 (small fire still present)
+
+Recommendations downgrade (e.g., evacuate may drop; monitor/secure may remain)
+
+CEE failure modes exposed
+
+Instance grounding failure (wrong fire/car instance suppressed → low CES_visual)
+
+Over-binary hazard collapse (hazard incorrectly goes to 0)
+
+Causal Form Mimicry (high structure/semantics but failed intervention)
+
+
+
+
+A house on fire in a neighborhood at night and a car is parked nearby
+

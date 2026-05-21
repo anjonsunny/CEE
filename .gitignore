@@ -1,0 +1,35 @@
+# Run outputs and batch results (potentially sensitive findings)
+exports/
+
+# Briefing slides and field reports (require ARL clearance before public distribution)
+*.key
+*.pptx
+CEE_plus_field_report.pdf
+CEE_plus_glossary.pdf
+CEE_plus_briefing*.pdf
+
+# Demo videos
+*.mov
+*.mp4
+
+# Logs and temporary outputs
+*.log
+out.txt
+/tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
+.idea/
+.vscode/
+
+# Large model weights
+*.pt
+*.bin
+*.safetensors

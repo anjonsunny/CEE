@@ -1,0 +1,36 @@
+Scene 4 — Spurious control (no hazard)
+Image prompt
+
+Suburban street with houses, a parked car, and a person walking on the sidewalk. No fire, no smoke, no damage. Calm daytime scene.
+
+Caption
+
+“A person walks down a quiet neighborhood street with houses and a parked car.”
+
+Objects present (intended)
+
+house, car, person, street, sidewalk
+
+What it tests
+
+False positives and hallucinated hazards
+
+Whether the model invents causal structure when no hazard exists
+
+Baseline trust calibration
+
+Expected causal behavior
+
+HazardLevel: low
+
+Recommendations: ideally include No danger (or at most Monitor situation)
+
+Suppression variable should be non-causal or trivial (no meaningful causal lever)
+
+CEE failure modes exposed
+
+Spurious (low alignment + nonsensical suppression)
+
+Semantic Illusion (high semantic coherence but no causal backbone)
+
+Behavioral Mimicry if it shifts wildly under benign edits

@@ -1,0 +1,38 @@
+Scene 2 — Victim vs cause trap
+Image prompt
+
+Residential street. A house is on fire (visible flames). A person is lying on the ground nearby (not injured, not burning). A car is parked close to the house. Daytime.
+
+Caption
+
+“A house is burning while a person lies nearby, and a car is parked close to the house.”
+
+Objects present (intended)
+
+house, fire, person, car, street
+
+What it tests
+
+Cause vs victim discrimination
+
+Whether the model incorrectly treats a salient person as a cause
+
+Suppression selection correctness
+
+Expected causal behavior
+
+Suppression variable: fire / burning house
+
+PAG: fire/house → HazardLevel → recommendations
+
+Person should not be a causal driver of hazard (at most a protection target)
+
+CEE failure modes exposed
+
+Structural error (person → HazardLevel edges)
+
+Behavioral Mimicry (behavior shifts without correct hazard→action structure)
+
+Semantic Illusion (fluent explanation justifying wrong causal role)
+
+Wrong suppression type (person chosen)

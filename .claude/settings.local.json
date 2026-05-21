@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\)['structured_response']; print\\('THREATS'\\); [print\\(' ',t['object_id'],t['state'],'-',t['reason']\\) for t in d['threats']]; print\\(\\); print\\('RECS'\\); [print\\(f' #{r[\\\\\"rank\\\\\"]} {r[\\\\\"action\\\\\"]}\\\\n    quad=\\({r[\\\\\"structured_reasoning\\\\\"][\\\\\"threat\\\\\"]},{r[\\\\\"structured_reasoning\\\\\"][\\\\\"state\\\\\"]},{r[\\\\\"structured_reasoning\\\\\"][\\\\\"effect\\\\\"]},{r[\\\\\"structured_reasoning\\\\\"][\\\\\"affected_object\\\\\"]}\\)\\\\n    reason={r[\\\\\"reason\\\\\"]}'\\) for r in d['recommendations']]; print\\(\\); print\\('GRAPH coverage=',d['causal_graph']['threat_reasoning_coverage']\\); print\\('orphans=',d['causal_graph']['orphan_threats']\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(conda run *)"
+    ]
+  }
+}
