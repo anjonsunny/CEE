@@ -1,0 +1,70 @@
+{
+  "image_filename": "push_05_armed_robbery.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "Viewed at night through a convenience-store front window, a hooded man aims a handgun at a clerk standing behind the counter with hands raised; two customers crouch behind the shelves trying to hide.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image vs prompt: prompt mentioned 'several' crouching customers; image clearly shows 2 crouching figures, so person_2 and person_3 only. Hands-up clerk and crouching customers all at-risk Distress umbrella — active defensive response to imminent threat. Object_ids use the schema-required label_N form (person_N rather than clerk_/customer_). man_1 is the armed threat aimed at the clerk and within direct line-of-fire / scatter range of the crouching customers. Restored state synonyms: person_1 fleeing->surrendering (hands raised behind counter), person_2 fleeing->crouching (visibly crouched behind shelves), person_3 fleeing->crouching (visibly crouched by door).",
+  "nodes": [
+    {
+      "id": "man_1",
+      "label": "person",
+      "state": "aiming",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "person_1",
+      "label": "person",
+      "state": "surrendering",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "person_2",
+      "label": "person",
+      "state": "crouching",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "person_3",
+      "label": "person",
+      "state": "crouching",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "person_4",
+      "label": "person",
+      "state": "crouching",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "man_1",
+      "target": "person_1",
+      "effect": "may_harm",
+      "via_state": "aiming"
+    },
+    {
+      "source": "man_1",
+      "target": "person_2",
+      "effect": "may_harm",
+      "via_state": "aiming"
+    },
+    {
+      "source": "man_1",
+      "target": "person_3",
+      "effect": "may_harm",
+      "via_state": "aiming"
+    },
+    {
+      "source": "man_1",
+      "target": "person_4",
+      "effect": "may_harm",
+      "via_state": "aiming"
+    }
+  ]
+}

@@ -3,7 +3,29 @@
     "allow": [
       "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\)['structured_response']; print\\('THREATS'\\); [print\\(' ',t['object_id'],t['state'],'-',t['reason']\\) for t in d['threats']]; print\\(\\); print\\('RECS'\\); [print\\(f' #{r[\\\\\"rank\\\\\"]} {r[\\\\\"action\\\\\"]}\\\\n    quad=\\({r[\\\\\"structured_reasoning\\\\\"][\\\\\"threat\\\\\"]},{r[\\\\\"structured_reasoning\\\\\"][\\\\\"state\\\\\"]},{r[\\\\\"structured_reasoning\\\\\"][\\\\\"effect\\\\\"]},{r[\\\\\"structured_reasoning\\\\\"][\\\\\"affected_object\\\\\"]}\\)\\\\n    reason={r[\\\\\"reason\\\\\"]}'\\) for r in d['recommendations']]; print\\(\\); print\\('GRAPH coverage=',d['causal_graph']['threat_reasoning_coverage']\\); print\\('orphans=',d['causal_graph']['orphan_threats']\\)\")",
       "Bash(python -c ' *)",
-      "Bash(conda run *)"
+      "Bash(conda run *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:11434/api/tags)",
+      "WebSearch",
+      "WebFetch(domain:scholar.google.com)",
+      "Read(//Users/sunny/causality/HCII_2026_VLM_CEE/**)",
+      "Bash(python3 -c ' *)",
+      "Bash(pip install *)",
+      "WebFetch(domain:jobs.ashbyhq.com)",
+      "WebFetch(domain:jobs.lever.co)",
+      "WebFetch(domain:job-boards.greenhouse.io)",
+      "WebFetch(domain:job-boards.eu.greenhouse.io)",
+      "Bash(python)",
+      "Bash(ps -p 52153 2>&1; echo \"---\"; ls /tmp/cee_batch_*.log 2>/dev/null | head; echo \"---\"; ls -lt /tmp/cee_batch_*.log 2>/dev/null | head -1)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(awk '/^@app.callback/{p=NR; getline; rest=$0; while \\(getline > 0 && !/^def /\\) rest=rest\"\\\\n\"$0; rest=rest\"\\\\n\"$0; if \\(rest ~ /gt-accept-active|gt-reject-active/\\) print \"L\"p\":\\\\n\"rest\"\\\\n---\"; }' /Users/sunny/Documents/CEE+/main.py)",
+      "Bash(mkdir -p /Users/sunny/Documents/CEE+/exports/ground_truth/verified_pre_image_regen && mv /Users/sunny/Documents/CEE+/exports/ground_truth/verified/push_*.gt.json /Users/sunny/Documents/CEE+/exports/ground_truth/verified_pre_image_regen/ && echo \"moved:\" && ls /Users/sunny/Documents/CEE+/exports/ground_truth/verified_pre_image_regen/ | wc -l && echo \"remaining in verified/:\" && ls /Users/sunny/Documents/CEE+/exports/ground_truth/verified/ | grep -c push_ || echo \"0 push files\")",
+      "Bash(python3 _analyze_gt.py)",
+      "Bash(python3 -)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

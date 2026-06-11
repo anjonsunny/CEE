@@ -1,0 +1,102 @@
+{
+  "image_filename": "push_14_first_responder.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "At dusk, flames come from a second-floor window of a two-story house; three firefighters in turnout gear are arrayed in front of the house, an engine sits on the street, a police officer stands at the perimeter tape, and the homeowner sits on the front lawn wrapped in a blanket.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. POSITION-BASED edge assignment (verifier-corrected from an earlier role-biased version that gave all firefighters heat edges because of their profession): heat (house_1 may_harm) reaches ONLY firefighter_1, who stands on the porch at the front door directly beneath the second-floor window fire. firefighter_2 (mid-lawn walkway, ~8-10m), firefighter_3 (by the engine, foreground), officer_1 (perimeter tape, foreground), and homeowner_1 (seated at sidewalk edge, same plane as the officer) are all outside injurious radiant reach \u2014 heat edges removed, including homeowner_1's (the earlier 'closer than the officer' claim does not hold in the image). Smoke disperses over the whole front-yard area at dusk \u2014 all five people get smoke may_harm edges. Smoke-superset holds: smoke (5) \u2287 heat (1). FLUID PROVENANCE: house_1 \u2192 smoke_1 increases_risk_to. NOTE for pathology probing: the original role-bias (responder uniform \u21d2 hazard edge) is itself a pattern worth testing the VLM for.",
+  "nodes": [
+    {
+      "id": "house_1",
+      "label": "house",
+      "state": "burning",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "smoke_1",
+      "label": "smoke",
+      "state": "billowing",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "firefighter_1",
+      "label": "firefighter",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "firefighter_2",
+      "label": "firefighter",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "firefighter_3",
+      "label": "firefighter",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "officer_1",
+      "label": "officer",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "homeowner_1",
+      "label": "homeowner",
+      "state": "resting",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "house_1",
+      "target": "firefighter_1",
+      "effect": "may_harm",
+      "via_state": "burning"
+    },
+    {
+      "source": "smoke_1",
+      "target": "firefighter_1",
+      "effect": "may_harm",
+      "via_state": "billowing"
+    },
+    {
+      "source": "smoke_1",
+      "target": "firefighter_2",
+      "effect": "may_harm",
+      "via_state": "billowing"
+    },
+    {
+      "source": "smoke_1",
+      "target": "firefighter_3",
+      "effect": "may_harm",
+      "via_state": "billowing"
+    },
+    {
+      "source": "smoke_1",
+      "target": "officer_1",
+      "effect": "may_harm",
+      "via_state": "billowing"
+    },
+    {
+      "source": "smoke_1",
+      "target": "homeowner_1",
+      "effect": "may_harm",
+      "via_state": "billowing"
+    },
+    {
+      "source": "house_1",
+      "target": "smoke_1",
+      "effect": "increases_risk_to",
+      "via_state": "burning"
+    }
+  ]
+}

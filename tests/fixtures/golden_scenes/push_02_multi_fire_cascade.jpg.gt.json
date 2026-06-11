@@ -1,0 +1,142 @@
+{
+  "image_filename": "push_02_multi_fire_cascade.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "Three adjacent suburban houses are involved in fire \u2014 the left house has roof flame, the middle is billowing heavy black smoke with no clear visible flame, and the right house has roof flame; a car parked in the driveway between the middle and right houses is fully engulfed in flames.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. MUTUAL-HAZARD RULE applied: house_1, house_2, house_3, and car_1 are all already burning, so no may_spread_to between them \u2014 propagation has occurred. Instead, mutual worsens edges between adjacent burning entities capture the heat/ember feeding (house_1\u2194house_2, house_2\u2194house_3, house_2\u2194car_1, house_3\u2194car_1). house_1 and house_3 are NOT adjacent (house_2 separates them) and house_1 and car_1 are similarly non-adjacent, so no mutual edges between those pairs. Self-loop worsens kept on each entity for intrinsic deterioration. Middle house emits smoke_1 as a separate billowing fluid hazard (heavy smoke output without visible flame). No people in scene, so smoke has no harm targets. C13 fix: added worsens self-loop(s) to standing hazard(s) without external targets (smoke_1). Verifier-driven update: ONE merged smoke node fed by ALL burning producers (house_1, house_2, house_3, car_1) via increases_risk_to provenance edges \u2014 asymmetric (fire feeds smoke, not vice versa), so increases_risk_to per the mutual-hazard rule, not worsens.",
+  "nodes": [
+    {
+      "id": "house_1",
+      "label": "house",
+      "state": "burning",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "house_2",
+      "label": "house",
+      "state": "burning",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "house_3",
+      "label": "house",
+      "state": "burning",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "car_1",
+      "label": "car",
+      "state": "burning",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "smoke_1",
+      "label": "smoke",
+      "state": "billowing",
+      "hazardous": true,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "house_1",
+      "target": "house_1",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_2",
+      "target": "house_2",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_3",
+      "target": "house_3",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "car_1",
+      "target": "car_1",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_1",
+      "target": "house_2",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_2",
+      "target": "house_1",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_2",
+      "target": "house_3",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_3",
+      "target": "house_2",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_2",
+      "target": "car_1",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "car_1",
+      "target": "house_2",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_3",
+      "target": "car_1",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "car_1",
+      "target": "house_3",
+      "effect": "worsens",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_1",
+      "target": "smoke_1",
+      "effect": "increases_risk_to",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_2",
+      "target": "smoke_1",
+      "effect": "increases_risk_to",
+      "via_state": "burning"
+    },
+    {
+      "source": "house_3",
+      "target": "smoke_1",
+      "effect": "increases_risk_to",
+      "via_state": "burning"
+    },
+    {
+      "source": "car_1",
+      "target": "smoke_1",
+      "effect": "increases_risk_to",
+      "via_state": "burning"
+    }
+  ]
+}

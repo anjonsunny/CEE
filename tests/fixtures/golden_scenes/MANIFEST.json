@@ -1,0 +1,27 @@
+{
+  "push_02_multi_fire_cascade.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_02_multi_fire_cascade.jpg.gt.json",
+    "gt_sha256": "9286ce8a2641455fab3d76f3a7f64b93aba7151ec302aec23c2a21976c7b2ee7",
+    "image": "push_02_multi_fire_cascade.jpg"
+  },
+  "push_05_armed_robbery.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_05_armed_robbery.jpg.gt.json",
+    "gt_sha256": "97fc0bc10e6094f8eae7c03f1b814c396da3fed3cf252cc40bf35fcf190bbbfa",
+    "image": "push_05_armed_robbery.jpg"
+  },
+  "push_06_drowning_pool.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_06_drowning_pool.jpg.gt.json",
+    "gt_sha256": "022ea976de570c4732bc24eb5f77fcd9aab26f844391491ff0d2aee9d53be187",
+    "image": "push_06_drowning_pool.jpg"
+  },
+  "push_09_tanker_near_fire.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_09_tanker_near_fire.jpg.gt.json",
+    "gt_sha256": "d918a59e4034006fda4146cad40ff875a0756e5e29222c21e383b07dba900bfd",
+    "image": "push_09_tanker_near_fire.jpg"
+  },
+  "push_14_first_responder.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_14_first_responder.jpg.gt.json",
+    "gt_sha256": "f98f2cc2334b90daaa9549a5c0e0158806fee14e1b93a7549694c38d6454701d",
+    "image": "push_14_first_responder.jpg"
+  }
+}

@@ -73,9 +73,28 @@ python main.py
 
 ## Research Stages
 
-- **Stage 1 (current paper):** Single suppression — one intervention variable per scene
-- **Stage 2 (future paper):** Multi suppression — multiple candidate variables, comparative causal analysis
-- **Stage 3 (future):** Progressive counterfactual reasoning — action → consequence → new state → new decision
+CEE+ positions itself on **Pearl's Ladder of Causation**. Rung 1 = association (what modern VLMs do well — fluent, coherent, retrieval over high-probability templates). Rung 3 = counterfactual (unit-specific "what would have happened if?" — three-step: abduction → action → prediction). The core claim: VLM safety recommendations are coherent on rung 1 but ungrounded on rung 3, and the gap is invisible to standard evaluation because rung-1 output looks like rung-3 reasoning. CEE+ is the probe that surfaces the gap.
+
+**The CEE+ pipeline is a counterfactual pipeline, not an intervention pipeline.** Conditioning on a specific scene = implicit abduction (VLM scene grounding fixes U); suppression = action (the do() step); measured shifts = unit-specific prediction. The "intervention type" (source-removal / edge-severance / target-mitigation) is the *shape* of the do() inside each counterfactual query.
+
+### Two orthogonal axes
+
+**Axis A — Suppression structure (depth of the counterfactual):**
+- **Stage 1 (current paper):** Single suppression — one rule-based do() per scene. Establishes the rung-1 vs rung-3 measurement methodology and the six shift signals.
+- **Stage 2 (next paper):** Multi suppression — multiple candidate do()s in the same scene, comparative analysis. Tests whether the model distinguishes competing hazards rather than collapsing them to a single dominant pattern.
+- **Stage 3 (future):** Progressive suppression — chained nested counterfactuals (action → consequence → new state → new decision). The canonical rung-3 query form; catches rung-1 masquerade that survives flat queries but breaks on chained reasoning.
+
+**Axis B — Probe generation (who picks the counterfactual):**
+- **Rule-based** — schema enumerates candidates deterministically. Reproducible, audit-able. Used throughout Stages 1–3 above.
+- **Adversarial LLM-generated** — separate model produces novel out-of-template counterfactuals. Addresses the concern that a sophisticated rung-1 model could pattern-match the rule-based query shape. Layered on top once the depth axis is established (Stage 4+).
+
+### Alignment track (downstream, parallel)
+
+The six shift signals are differentiable enough to serve as reward shaping or preference labels. Once Stage 2 or 3 signals are validated, a parallel track uses them to fine-tune VLMs toward causally honest behavior — not just measure the gap but close it. Methodological stance: CEE+ does not adjudicate whether the underlying mechanism is "real" causal reasoning or sophisticated mimicry; it claims only that a model passing CEE+ counterfactual consistency probes behaves indistinguishably from one that reasons causally on the query class, which is the standard a deployment context can audit. See memory files `project-pearl-framing` and `project-cee-alignment-ambition`.
+
+### Recommended path
+
+Stage 1 → Stage 2 (multi, rule-based) → Stage 3 (progressive, rule-based) → Stage 4 (adversarial layered on top). Alignment program spins off once Stage 2+ signals exist. Extending the depth axis before introducing the generator dependency keeps each stage methodologically defensible without adding a probe-quality confound.
 
 ## Working Style Preferences
 

@@ -1,0 +1,44 @@
+{
+  "image_filename": "push_06_drowning_pool.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "An outdoor public swimming pool with two children in distress in the water — one thrashing at the surface in the foreground, the other floating motionless at the far end — and an empty lifeguard chair on the deck.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. Engulfing-medium scene: water_1 is calm (no rising/spreading) but physically contains two children in at-risk Distress states (drowning, unconscious), satisfying the engulfing truth condition. Realistic intervention is edge-severance (extract the children from the water), not draining. Tests engulfing-state recognition and Distress-coloring in graph viewer.",
+  "nodes": [
+    {
+      "id": "water_1",
+      "label": "water",
+      "state": "engulfing",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "child_1",
+      "label": "child",
+      "state": "drowning",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "child_2",
+      "label": "child",
+      "state": "unconscious",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "water_1",
+      "target": "child_1",
+      "effect": "may_harm",
+      "via_state": "engulfing"
+    },
+    {
+      "source": "water_1",
+      "target": "child_2",
+      "effect": "may_harm",
+      "via_state": "engulfing"
+    }
+  ]
+}

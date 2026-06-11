@@ -253,3 +253,55 @@ the field supposed to demonstrate reasoning about action consequences.
 - Confirm whether the terminal self-check is part of pass 1 or pass 2 —
   currently noted as additive but it may be worth trying early because it
   is cheap.
+
+## 9. Private research note: real-world anchors for Institutional Deference (2026-05-26)
+
+Internal record only. Not shipped in the UI, batch report, slide deck, or any
+rendered artifact. Captured here so the research trail isn't lost and so the
+operational scope of the pathology stays grounded in evidence.
+
+The pathology renamed in the codebase as **Institutional Deference** (was Truth
+Suppression for Peace) has the following real-world allocation-pattern anchors
+in the public record:
+
+- **FEMA Hurricane Milton incident, Lake Placid FL, Nov 2024.** Supervisor
+  instructed canvassers to skip homes displaying political campaign signage;
+  approximately 20 homes skipped over two weeks; supervisor terminated. Cleanest
+  documented case of attribute-based allocation softening at the human level.
+- **Justice40 Initiative + Social Vulnerability Index, 2021–2025.** Federal
+  policy under EO 14008 directed 40% of certain federal benefits to
+  "disadvantaged communities" identified by CDC's SVI, which used four
+  attribute categories including socioeconomic status and minority status.
+  Rescinded January 2025; SVI itself was not formally removed but no longer
+  drives FEMA allocation. Confirms that explicit attribute-weighted allocation
+  systems existed at federal scale.
+- **Hurricane Helene, Sept–Oct 2024.** Public allegations of FEMA
+  deprioritization based on regional or political factors; agency denied;
+  unverified at the time but partially contextualized a month later by the
+  Milton incident.
+- **Lahaina, Maui, Aug 2023.** Aid distribution disparities along
+  geographic/residency/cultural lines: official aid centers 10 miles distant
+  from impacted area, non-resident workers ineligible for federal assistance,
+  Native Hawaiian community built parallel aid networks due to distrust.
+  Disparities primarily structural rather than explicitly attribute-based.
+- **Long-running structural pattern.** Decades of FEMA research show aid
+  flows disproportionately to homeowners and wealthier survivors, deepening
+  racial and socioeconomic gaps. Justice40 was the policy attempt to correct
+  this; rescission returns the system to the prior distribution.
+
+**Why kept out of the shipped framework.** Politically and racially flavored
+markers carry organizational risk in the ARL context. The pathology's
+operational essence (safety-tuning over-reach producing softened findings on
+weighted entities) survives intact without those markers. The shipped
+typology uses five neutral weight types: institutional / official sites,
+cultural / heritage sites, vulnerable-population indicators, residency or
+occupancy ambiguity, and first-responder / emergency-services entities. The
+ML mechanism (harm-avoidance penalty during safety tuning) is identical
+regardless of which weight class triggers it; the cascade narrative works
+equally well with neutral framings.
+
+**Why kept on record at all.** If the framework is challenged on whether
+Institutional Deference is a real phenomenon or a hypothesized one, the
+anchors above demonstrate the underlying allocation pattern exists in the
+historical record at human-decision scale. The model-level analogue is
+inference, not proof; the human-level analogue is documented.

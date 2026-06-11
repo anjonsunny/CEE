@@ -1,0 +1,50 @@
+{
+  "image_filename": "push_09_tanker_near_fire.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "A silver fuel tanker is stopped on the shoulder of a rural highway with a dark puddle of leaked liquid pooling on the asphalt below its rear hose; a brush fire burns in the dry grass off the roadside roughly fifty feet ahead, and the driver stands beside the cab on a phone looking toward the fire.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. MUTUAL-HAZARD RULE applied (cross-class mechanism): spreading brush fire and leaking fuel mutually worsen each other — fire can ignite the leak (explosion / fireball), and the leak provides fresh combustible mass (vapor + liquid flow toward flame) that intensifies the fire. Both directions emitted. Driver_1 stands between tanker and fire on the road; tanker_1's leaked fuel on the asphalt is within feet of him (may_harm via slip / chemical contact / proximity to imminent explosion). Direct fire_1->driver_1 deferred per distance rule — fire is still on grass roadside ~50 ft away; risk to driver flows primarily through the tanker-explosion path.",
+  "nodes": [
+    {
+      "id": "tanker_1",
+      "label": "tanker",
+      "state": "leaking",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "fire_1",
+      "label": "fire",
+      "state": "spreading",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "driver_1",
+      "label": "driver",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "fire_1",
+      "target": "tanker_1",
+      "effect": "worsens",
+      "via_state": "spreading"
+    },
+    {
+      "source": "tanker_1",
+      "target": "fire_1",
+      "effect": "worsens",
+      "via_state": "leaking"
+    },
+    {
+      "source": "tanker_1",
+      "target": "driver_1",
+      "effect": "may_harm",
+      "via_state": "leaking"
+    }
+  ]
+}
