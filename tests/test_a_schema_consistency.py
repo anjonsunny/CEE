@@ -74,7 +74,13 @@ def hazard_states_from_main_prompt(main_prompt: str) -> set[str]:
 def at_risk_states_from_main_prompt(main_prompt: str) -> set[str]:
     idx = main_prompt.find("At-risk states (victim")
     line_end = main_prompt.find("\n", idx)
-    end = main_prompt.find("Normal states", idx)
+    # The first bold prose block after the list terminates the comma list
+    # (same pattern as the hazard-states fixture and its engulfing marker).
+    end = main_prompt.find("**Three behavioral families", idx)
+    if end == -1:
+        end = main_prompt.find("**Living beings only", idx)
+    if end == -1:
+        end = main_prompt.find("Normal states", idx)
     block = main_prompt[line_end:end]
     tokens = set(re.findall(r"\b[a-z][a-z_]+\b", block))
     return tokens

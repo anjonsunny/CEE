@@ -238,6 +238,7 @@ def test_b12_may_harm_tense_clause_present_in_both(main_prompt, graph_b_prompt):
     fragments = [
         "currently injuring",
         "actualized",
+        "already hazardous",  # may_harm never targets an existing hazard (push_18 generalization)
     ]
     missing = _both_contain(main_prompt, graph_b_prompt, fragments)
     assert not missing, f"may_harm tense clause fragments missing: {missing}"
@@ -256,6 +257,8 @@ def test_b10_representative_instancing_present_in_both(main_prompt, graph_b_prom
         "Representative instancing",
         "TEN nodes",
         "summarize",  # main: "Summarize the remaining"; graph_b: "summarized in prose"
+        "COUNTED, not summarized",  # people exception (push_36 episode)
+        "SIX",  # people-counting threshold (push_39 episode)
     ]
     missing = _both_contain(main_prompt, graph_b_prompt, fragments)
     assert not missing, f"representative instancing fragments missing: {missing}"

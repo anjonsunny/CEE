@@ -1,0 +1,96 @@
+{
+  "image_filename": "push_41_storm_surge_coast_overview.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "High-altitude aerial view over a coastal town \u2014 storm surge has pushed brown ocean water inland with breaking waves in the foreground and inundation extending several blocks; waterfront houses show severe roof and wall damage, others further inland are intact but surrounded by water.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. Damage gradient: heavy near the waterfront (collapsing/flooded), lessening further inland (intact but at risk of being reached). Person on inland rooftop not individually visible at this altitude \u2014 dropped person_1. Water reaches inundated buildings (may_harm \u2014 already affected) and trajectory toward intact inland buildings (may_spread_to). EFFECT RELABEL (fluid -> already-hazardous target): water_1->building_1, water_1->building_2, water_1->building_3, water_1->car_1, water_1->car_2 changed may_harm -> increases_risk_to per may_harm truth condition.",
+  "nodes": [
+    {
+      "id": "water_1",
+      "label": "water",
+      "state": "rising",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "building_1",
+      "label": "building",
+      "state": "collapsing",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "building_2",
+      "label": "building",
+      "state": "flooded",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "building_3",
+      "label": "building",
+      "state": "flooded",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "building_4",
+      "label": "building",
+      "state": "intact",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "car_1",
+      "label": "car",
+      "state": "flooded",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "car_2",
+      "label": "car",
+      "state": "flooded",
+      "hazardous": true,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "water_1",
+      "target": "building_1",
+      "effect": "increases_risk_to",
+      "via_state": "rising"
+    },
+    {
+      "source": "water_1",
+      "target": "building_2",
+      "effect": "increases_risk_to",
+      "via_state": "rising"
+    },
+    {
+      "source": "water_1",
+      "target": "building_3",
+      "effect": "increases_risk_to",
+      "via_state": "rising"
+    },
+    {
+      "source": "water_1",
+      "target": "building_4",
+      "effect": "may_spread_to",
+      "via_state": "rising"
+    },
+    {
+      "source": "water_1",
+      "target": "car_1",
+      "effect": "increases_risk_to",
+      "via_state": "rising"
+    },
+    {
+      "source": "water_1",
+      "target": "car_2",
+      "effect": "increases_risk_to",
+      "via_state": "rising"
+    }
+  ]
+}

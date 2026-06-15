@@ -25,7 +25,26 @@
       "Bash(python3 _analyze_gt.py)",
       "Bash(python3 -)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh auth *)",
+      "Read(//Users/sunny/**)",
+      "Bash(git ls-remote *)",
+      "Bash(ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N \"\" -C \"anjon.sunny@gmail.com\" -q)",
+      "Bash(ssh-keyscan -t ed25519 github.com)",
+      "Bash(git remote *)",
+      "Skill(fewer-permission-prompts)",
+      "Skill(fewer-permission-prompts:*)",
+      "Bash(sed -n '1378,1392p' main.py)",
+      "Bash(sed -n '4216,4234p' main.py)",
+      "WebFetch(domain:www.griddynamics.com)",
+      "mcp__plugin_pdf-viewer_pdf__display_pdf",
+      "Bash(awk 'NR>=3763 && /^    return /{print NR\": \"$0; exit}' main.py)",
+      "Bash(awk 'NR>=3763 && /^    return report$|^    return \\\\{/{print NR; exit}' main.py)",
+      "Bash(sed -n \"$\\(awk 'NR>=3763 && /^    return report$|^    return \\\\{/{print NR; exit}' main.py\\),+3p\" main.py)",
+      "Bash(sed -n '12500,12520p' main.py)",
+      "Bash(sed -n '12728,12742p' main.py)",
+      "Bash(git reset *)"
     ]
   }
 }

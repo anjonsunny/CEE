@@ -127,7 +127,12 @@ column two.
 
 ## Known debt
 
-- Single-scene results tab is getting crowded; needs a layout pass.
+- ~~Single-scene results tab is getting crowded; needs a layout pass.~~ Done
+  2026-06-11: grouped into five collapsible sections following the module
+  levels (scene reading → graphs → self-checks → GT checks → trust). Test H5
+  pins the ids and ordering.
 - Rule conformance not yet wired into the trust score (deliberate: changing
-  the score formula mid-verification would churn results).
+  the score formula mid-verification would churn results). Its BATCH tally
+  exists (P-series): the Test 1 report now sums violations per rule across
+  all runs and counts close-pair vocabulary swaps per matched pair.
 - K-series behavioral tests await captured model outputs against goldens.

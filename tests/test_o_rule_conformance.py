@@ -62,7 +62,7 @@ def test_o3_fluid_may_harm_hazardous_target(main_module):
         ],
         "edges": [_edge("water_1", "house_1", "may_harm", "rising")],
     }
-    assert "fluid_may_harm_hazardous_target" in _rules_of(main_module, graph)
+    assert "may_harm_hazardous_target" in _rules_of(main_module, graph)
 
 
 # O4 — fluid uses a non-victim effect on a person.
@@ -196,4 +196,127 @@ def test_o11_aggregate_counts(main_module):
     }
     rc = main_module.compute_rule_conformance(bad, bad)
     assert rc["n_violations"] == 2  # one per graph
-    assert rc["by_rule"].get("fluid_may_harm_hazardous_target") == 2
+    assert rc["by_rule"].get("may_harm_hazardous_target") == 2
+
+
+# O13 — redundant instancing: six causal clones flagged, three are fine.
+@pytest.mark.blocking
+def test_o13_redundant_instancing(main_module):
+    def flood_scene(n_houses):
+        nodes = [_node("water_1", "water", "rising", True)]
+        edges = []
+        for i in range(1, n_houses + 1):
+            nodes.append(_node(f"house_{i}", "house", "flooded", True))
+            edges.append(_edge("water_1", f"house_{i}", "increases_risk_to", "rising"))
+        return {"nodes": nodes, "edges": edges}
+
+    six = _rules_of(main_module, flood_scene(6))
+    three = _rules_of(main_module, flood_scene(3))
+    assert "redundant_instancing" in six
+    assert "redundant_instancing" not in three
+
+
+# O14 — causally DISTINCT nodes are never flagged as redundant.
+@pytest.mark.blocking
+def test_o14_distinct_nodes_not_flagged(main_module):
+    # Six houses but in three different causal situations: flooded,
+    # collapsing, intact-in-trajectory. Largest identical group is 2.
+    nodes = [_node("water_1", "water", "rising", True)]
+    edges = []
+    states = ["flooded", "flooded", "collapsing", "collapsing", "intact", "intact"]
+    effects = {"flooded": "increases_risk_to", "collapsing": "increases_risk_to", "intact": "may_spread_to"}
+    for i, st in enumerate(states, 1):
+        nodes.append(_node(f"house_{i}", "house", st, st != "intact"))
+        edges.append(_edge("water_1", f"house_{i}", effects[st], "rising"))
+    for i, st in enumerate(states, 1):
+        if st == "collapsing":
+            edges.append(_edge(f"house_{i}", f"house_{i}", "worsens", "collapsing"))
+    rules = _rules_of(main_module, {"nodes": nodes, "edges": edges})
+    assert "redundant_instancing" not in rules
+
+
+# O15 — node budget: a 14-node graph trips the cap.
+@pytest.mark.blocking
+def test_o15_node_budget(main_module):
+    nodes = [_node("water_1", "water", "rising", True)]
+    edges = []
+    for i in range(1, 14):
+        st = "flooded" if i % 2 else "intact"
+        nodes.append(_node(f"e_{i}", f"label{i}", st, st == "flooded"))
+        eff = "increases_risk_to" if st == "flooded" else "may_spread_to"
+        edges.append(_edge("water_1", f"e_{i}", eff, "rising"))
+    rules = _rules_of(main_module, {"nodes": nodes, "edges": edges})
+    assert "node_budget_exceeded" in rules
+
+
+# O16 — the generalized rule: a NON-fluid source (flying sign) may_harm an
+# already-hazardous house is caught too (push_18 case).
+@pytest.mark.blocking
+def test_o16_non_fluid_may_harm_hazardous_target(main_module):
+    graph = {
+        "nodes": [
+            _node("sign_1", "sign", "approaching", True),
+            _node("house_1", "house", "collapsing", True),
+        ],
+        "edges": [
+            _edge("sign_1", "house_1", "may_harm", "approaching"),
+            _edge("house_1", "house_1", "worsens", "collapsing"),
+        ],
+    }
+    assert "may_harm_hazardous_target" in _rules_of(main_module, graph)
+
+
+# O17 — distress states belong to living beings only: a "trapped car" is
+# flagged; the trapped person inside it is not.
+@pytest.mark.blocking
+def test_o17_distress_state_on_non_living(main_module):
+    graph = {
+        "nodes": [
+            _node("water_1", "water", "rising", True),
+            _node("car_1", "car", "trapped"),       # wrong: vehicle in distress
+            _node("driver_1", "driver", "trapped"), # right: living being
+        ],
+        "edges": [
+            _edge("water_1", "car_1", "may_spread_to", "rising"),
+            _edge("water_1", "driver_1", "may_harm", "rising"),
+        ],
+    }
+    violations = main_module.check_graph_rule_conformance(graph, "test")
+    flagged = [v["detail"] for v in violations if v["rule"] == "distress_state_on_non_living"]
+    assert any("car_1" in d for d in flagged), "trapped car must be flagged"
+    assert not any("driver_1" in d for d in flagged), "trapped driver is legitimate"
+
+
+# O18 — people are never clone-flagged: six identical stranded people pass;
+# six identical flooded houses (O13) still fail.
+@pytest.mark.blocking
+def test_o18_people_exempt_from_redundant_instancing(main_module):
+    nodes = [_node("water_1", "water", "rising", True)]
+    edges = []
+    for i in range(1, 7):
+        nodes.append(_node(f"person_{i}", "person", "stranded"))
+        edges.append(_edge("water_1", f"person_{i}", "isolates", "rising"))
+    rules = _rules_of(main_module, {"nodes": nodes, "edges": edges})
+    assert "redundant_instancing" not in rules
+
+
+# O19 — minimal self-loop rule: a loop alongside real edges is flagged; the
+# placeholder loop on an otherwise edge-less hazard is not.
+@pytest.mark.blocking
+def test_o19_redundant_self_loop(main_module):
+    graph = {
+        "nodes": [
+            _node("fire_1", "fire", "spreading", True),
+            _node("smoke_1", "smoke", "billowing", True),
+            _node("car_9", "car", "crushed", True),  # orphan: loop is correct
+        ],
+        "edges": [
+            _edge("fire_1", "smoke_1", "increases_risk_to", "spreading"),
+            _edge("fire_1", "fire_1", "worsens", "spreading"),   # redundant
+            _edge("car_9", "car_9", "worsens", "crushed"),        # legitimate
+        ],
+    }
+    violations = main_module.check_graph_rule_conformance(graph, "test")
+    flagged = [v["detail"] for v in violations if v["rule"] == "redundant_self_loop"]
+    assert any("fire_1" in d for d in flagged)
+    assert not any("car_9" in d for d in flagged)

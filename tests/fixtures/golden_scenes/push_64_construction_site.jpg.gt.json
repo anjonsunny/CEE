@@ -1,0 +1,59 @@
+{
+  "image_filename": "push_64_construction_site.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "An active mid-stage commercial construction site on a clear workday \u2014 a partially built multi-story building has visible steel framing on upper floors and finished walls on the lower floors, workers in hard hats and high-vis vests are visible at multiple levels, a yellow crane operates, a bulldozer is parked at the edge, and stacks of construction materials sit on pallets in the foreground.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. TRAP NEGATIVE CONTROL \u2014 looks damage-like (partial walls, exposed framing, scaffolding) but it is NORMAL construction, not collapse. Building state should be `intact`, NOT `collapsed`/`collapsing`. Workers at height should NOT be at-risk despite the working conditions. No hazards, no edges.",
+  "nodes": [
+    {
+      "id": "building_1",
+      "label": "building",
+      "state": "intact",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "worker_1",
+      "label": "worker",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "worker_2",
+      "label": "worker",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "worker_3",
+      "label": "worker",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "worker_4",
+      "label": "worker",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "crane_1",
+      "label": "crane",
+      "state": "intact",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "bulldozer_1",
+      "label": "bulldozer",
+      "state": "intact",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": []
+}

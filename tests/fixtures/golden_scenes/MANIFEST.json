@@ -1,7 +1,7 @@
 {
   "push_02_multi_fire_cascade.jpg.gt.json": {
     "frozen_from": "exports/ground_truth/verified/push_02_multi_fire_cascade.jpg.gt.json",
-    "gt_sha256": "9286ce8a2641455fab3d76f3a7f64b93aba7151ec302aec23c2a21976c7b2ee7",
+    "gt_sha256": "c6d7a2b64fa7cf846df338c884a3b7b6cd66d7afbdb3ba0378f47459612c1dd3",
     "image": "push_02_multi_fire_cascade.jpg"
   },
   "push_05_armed_robbery.jpg.gt.json": {
@@ -19,9 +19,59 @@
     "gt_sha256": "d918a59e4034006fda4146cad40ff875a0756e5e29222c21e383b07dba900bfd",
     "image": "push_09_tanker_near_fire.jpg"
   },
+  "push_11_mixed_neighborhood.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_11_mixed_neighborhood.jpg.gt.json",
+    "gt_sha256": "80ef66023d008808eb090e1a2cfb07e3b1ad9f184754bbbba9b5a3ea7c94ee5a",
+    "image": "push_11_mixed_neighborhood.jpg"
+  },
   "push_14_first_responder.jpg.gt.json": {
     "frozen_from": "exports/ground_truth/verified/push_14_first_responder.jpg.gt.json",
     "gt_sha256": "f98f2cc2334b90daaa9549a5c0e0158806fee14e1b93a7549694c38d6454701d",
     "image": "push_14_first_responder.jpg"
+  },
+  "push_22_mudslide_buried_cars.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_22_mudslide_buried_cars.jpg.gt.json",
+    "gt_sha256": "d9db64ef6b742f1f506d591aa1f8b9869ac4190a90989e3bc384514932e31371",
+    "image": "push_22_mudslide_buried_cars.jpg"
+  },
+  "push_24_flooded_gas_station_sparks.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_24_flooded_gas_station_sparks.jpg.gt.json",
+    "gt_sha256": "45df64a9ba1a4b51accdb79d3e04cb3f56e8926b20263d2d8fc26167a4377c54",
+    "image": "push_24_flooded_gas_station_sparks.jpg"
+  },
+  "push_41_storm_surge_coast_overview.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_41_storm_surge_coast_overview.jpg.gt.json",
+    "gt_sha256": "6ea446ce6126aebf3f43adabc7d8e50cd4d153543be62b8ddfd481b6bff8a048",
+    "image": "push_41_storm_surge_coast_overview.jpg"
+  },
+  "push_42_wildfire_across_road.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_42_wildfire_across_road.jpg.gt.json",
+    "gt_sha256": "db4b13265f2098c0d1848f27c4389c42076b15407e12c32a7c58bfb2647bb283",
+    "image": "push_42_wildfire_across_road.jpg"
+  },
+  "push_61_park_saturday.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_61_park_saturday.jpg.gt.json",
+    "gt_sha256": "cc5a614be756d0303b5320edc6845241dbe83ad21389c43e3ee2dd84b3c79594",
+    "image": "push_61_park_saturday.jpg"
+  },
+  "push_63_school_recess.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_63_school_recess.jpg.gt.json",
+    "gt_sha256": "b88d1ab96951a19010dfddfd2620714736b6d6e9c3bef36e283bdbfa94c0160a",
+    "image": "push_63_school_recess.jpg"
+  },
+  "push_64_construction_site.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_64_construction_site.jpg.gt.json",
+    "gt_sha256": "e1bf743f9a80ee915b65aa08d68506b6810c9b43a46ce7d973bb4bb03a9679ae",
+    "image": "push_64_construction_site.jpg"
+  },
+  "push_69_collapsed_confined_space.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_69_collapsed_confined_space.jpg.gt.json",
+    "gt_sha256": "39be43093e1b34b45d4031a415e7b229038c3780ce6b60c966341d24fb389115",
+    "image": "push_69_collapsed_confined_space.jpg"
+  },
+  "push_70_charging_bull.jpg.gt.json": {
+    "frozen_from": "exports/ground_truth/verified/push_70_charging_bull.jpg.gt.json",
+    "gt_sha256": "737810dff3a8f218a420f47ab1c899c1f06af1b85d4e0a78c171258652ffd3c6",
+    "image": "push_70_charging_bull.jpg"
   }
 }

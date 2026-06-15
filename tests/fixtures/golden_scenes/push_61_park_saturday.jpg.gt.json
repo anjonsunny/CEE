@@ -1,0 +1,59 @@
+{
+  "image_filename": "push_61_park_saturday.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "A public park on a bright sunny afternoon \u2014 families on picnic blankets in the grass, children playing on a metal swing set, a small dog running on the lawn, two adults sitting on a bench reading, and other people scattered around in normal recreational activity.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. NEGATIVE CONTROL \u2014 non-disaster scene. No hazards, no at-risk entities, no edges. Dog running on the grass should NOT be classified as `charging`; children playing should NOT be `fleeing`. Any pathology detector firing on this scene is over-firing.",
+  "nodes": [
+    {
+      "id": "man_1",
+      "label": "man",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "woman_1",
+      "label": "woman",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "child_1",
+      "label": "child",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "child_2",
+      "label": "child",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "dog_1",
+      "label": "dog",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "person_1",
+      "label": "person",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "person_2",
+      "label": "person",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": []
+}

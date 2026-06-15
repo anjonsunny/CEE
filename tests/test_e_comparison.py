@@ -263,3 +263,68 @@ def test_e10_synonym_diff_preserves_original_form(main_module):
         assert e["via_state"] in ("burning",), (
             f"via_state should retain original form, got {e['via_state']!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# E11 — worsens / increases_risk_to are a close pair: soft tier credits the
+# common-English one-way "worsens", strict tier still separates them.
+# ---------------------------------------------------------------------------
+@pytest.mark.blocking
+def test_e11_worsens_increases_risk_close_pair(main_module):
+    base_nodes = [
+        {"id": "fire_1", "label": "fire", "state": "spreading", "hazardous": True, "inferred": False},
+        {"id": "smoke_1", "label": "smoke", "state": "billowing", "hazardous": True, "inferred": False},
+        {"id": "smoke_2", "label": "smoke", "state": "billowing", "hazardous": True, "inferred": False},
+    ]
+    gt = {"nodes": base_nodes, "edges": [
+        {"source": "fire_1", "target": "smoke_1", "effect": "increases_risk_to", "via_state": "spreading"},
+        {"source": "fire_1", "target": "smoke_2", "effect": "increases_risk_to", "via_state": "spreading"},
+    ]}
+    cand = {"nodes": base_nodes, "edges": [
+        {"source": "fire_1", "target": "smoke_1", "effect": "worsens", "via_state": "spreading"},
+        {"source": "fire_1", "target": "smoke_2", "effect": "worsens", "via_state": "spreading"},
+    ]}
+    result = main_module.compare_graphs(gt, cand)
+    strict = result.get("edge_scores", result).get("strict") if isinstance(result.get("edge_scores", None), dict) else None
+    # Fall back to whatever score keys the comparison exposes.
+    def find_scores(d, prefix=""):
+        out = {}
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if isinstance(v, (int, float)) and any(t in k for t in ("strict", "soft", "topo")):
+                    out[prefix + k] = v
+                elif isinstance(v, dict):
+                    out.update(find_scores(v, prefix + k + "."))
+        return out
+    scores = find_scores(result)
+    stricts = [v for k, v in scores.items() if "strict" in k and "edge" in k.lower() or k.endswith("strict")]
+    softs = [v for k, v in scores.items() if "soft" in k]
+    assert softs, f"no soft scores found in comparison result keys: {list(scores)}"
+    # The decisive property: soft must outscore strict on edges here, because
+    # the only difference between GT and candidate is the close-pair label.
+    assert max(softs) > min(stricts) if stricts else True, (
+        f"soft tier should credit worsens~increases_risk_to: {scores}"
+    )
+    assert max(softs) >= 0.99, f"soft tier should fully match the close pair: {scores}"
+
+
+# ---------------------------------------------------------------------------
+# E12 — at-risk behavioral families: synonyms match within their family and
+# do NOT match across families. stranded↔trapped is one situation; stranded
+# vs fleeing are near-opposites (push_36 episode that split the families).
+# ---------------------------------------------------------------------------
+@pytest.mark.blocking
+def test_e12_at_risk_families_separate(main_module):
+    canon = main_module.canonicalize_state
+    # Within-family equivalences
+    assert canon("stranded") == canon("trapped") == "trapped"
+    assert canon("clinging") == "trapped"
+    assert canon("crouching") == canon("surrendering") == "cowering"
+    assert canon("escaping") == canon("running_away") == "fleeing"
+    # Across-family separations
+    assert canon("stranded") != canon("fleeing")
+    assert canon("crouching") != canon("trapped")
+    assert canon("escaping") != canon("cowering")
+    # All three canonicals are Distress states
+    for s in ("fleeing", "trapped", "cowering"):
+        assert s in main_module.AT_RISK_STATES

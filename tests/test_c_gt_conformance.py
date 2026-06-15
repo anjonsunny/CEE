@@ -490,6 +490,7 @@ def test_c21_schema_version_current(path: Path, main_module):
 # ---------------------------------------------------------------------------
 SMOKE_PRODUCER_STATES = {"burning", "spreading", "collapsing"}
 DUST_PRODUCER_STATES = {"collapsing", "collapsed", "fallen"}
+CHEMICAL_PRODUCER_STATES = {"leaking", "fallen", "crushed"}
 
 
 @pytest.mark.warn
@@ -507,6 +508,8 @@ def test_c22_fluid_provenance_heuristic(path: Path):
             producer_states = SMOKE_PRODUCER_STATES
         elif label == "dust":
             producer_states = DUST_PRODUCER_STATES
+        elif label in ("chemical", "gas"):
+            producer_states = CHEMICAL_PRODUCER_STATES
         else:
             continue
         producers = [
@@ -540,7 +543,10 @@ HARM_LIKE_EFFECTS = {"may_harm", "threatens"}
 PERSONISH_LABELS = {
     "person", "man", "woman", "child", "firefighter", "officer", "rescuer",
     "homeowner", "driver", "worker", "resident", "responder", "victim",
-    "bystander", "paramedic", "dog", "cow", "horse", "animal", "bull",
+    "bystander", "paramedic", "clerk", "customer", "family",
+    "infant", "baby", "teenager", "boy", "girl", "patient", "nurse",
+    "doctor", "medic", "farmer", "shopkeeper", "vendor",
+    "dog", "cow", "horse", "animal", "bull",
 }
 
 
@@ -628,7 +634,7 @@ RESPONDER_LABELS = {"firefighter", "officer", "rescuer", "paramedic", "responder
 
 # scene-file basename → verdict. PENDING = awaiting human image verification.
 C25_ALLOWLIST = {
-    "push_34_apartment_collapse_rescue.jpg.gt.json": "PENDING human verification — are all 4 rescuers on the pile?",
+    "push_34_apartment_collapse_rescue.jpg.gt.json": "VERIFIED 2026-06-11: rescuer_1..4 are representatives of the on-pile crew; uniform building+debris edges are position-correct for that group; street-level personnel deliberately not instanced.",
     "push_40_collapse_search_grid.jpg.gt.json": "PENDING human verification — search-grid rescuers vs perimeter",
     "push_53_wildland_jumping_line.jpg.gt.json": "PENDING human verification — all 4 crew within flame reach?",
 }
@@ -725,17 +731,16 @@ C27_FLUID_LABELS = {"water", "mud", "smoke", "dust", "gas", "chemical"}
 
 @pytest.mark.blocking
 @pytest.mark.parametrize("path", list(all_push_test_gts()))
-def test_c27_fluid_to_hazardous_uses_increases_risk_to(path: Path, main_module):
+def test_c27_may_harm_never_targets_hazardous(path: Path, main_module):
     gt = _load(path)
     nodes = {str(n.get("id", "")): n for n in gt.get("nodes") or []}
     bad: list[str] = []
     for e in gt.get("edges") or []:
         if str(e.get("effect", "")).strip() != "may_harm":
             continue
-        src = nodes.get(str(e.get("source", "")), {})
-        tgt = nodes.get(str(e.get("target", "")), {})
-        if str(src.get("label", "")).strip().lower() not in C27_FLUID_LABELS:
+        if str(e.get("source", "")) == str(e.get("target", "")):
             continue
+        tgt = nodes.get(str(e.get("target", "")), {})
         tgt_state = main_module.canonicalize_state(str(tgt.get("state", "")).strip())
         if tgt.get("hazardous") and tgt_state in main_module.HAZARD_BEARING_STATES:
             bad.append(
@@ -743,3 +748,64 @@ def test_c27_fluid_to_hazardous_uses_increases_risk_to(path: Path, main_module):
                 f"target is already hazardous; use increases_risk_to"
             )
     assert not bad, f"{path.name}: {bad}"
+
+
+# ---------------------------------------------------------------------------
+# C28 — Distress states on living beings only. A GT must never put an
+# at-risk state (including synonyms: trapped, stranded, clinging...) on a
+# vehicle or structure; the person inside is a separate entity.
+# ---------------------------------------------------------------------------
+@pytest.mark.blocking
+@pytest.mark.parametrize("path", list(all_push_test_gts()))
+def test_c28_distress_states_living_only(path: Path, main_module):
+    gt = _load(path)
+    bad: list[str] = []
+    for n in gt.get("nodes") or []:
+        canon = main_module.canonicalize_state(str(n.get("state", "")).strip())
+        label = str(n.get("label", "")).strip().lower()
+        if canon in main_module.AT_RISK_STATES and label not in PERSONISH_LABELS:
+            bad.append(f"{n.get('id')} ({label}) state={n.get('state')}")
+    assert not bad, f"{path.name}: distress states on non-living entities: {bad}"
+
+
+# ---------------------------------------------------------------------------
+# C29 — bbox sanity (Phase 1). Boxes are optional; when present they must be
+# normalized [x1,y1,x2,y2] with 0<=x1<x2<=1, 0<=y1<y2<=1. Same for every
+# member box in a representative's "represents" list.
+# ---------------------------------------------------------------------------
+def _bbox_ok(b) -> bool:
+    try:
+        x1, y1, x2, y2 = [float(v) for v in b]
+    except Exception:
+        return False
+    return 0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0
+
+
+@pytest.mark.blocking
+@pytest.mark.parametrize("path", list(all_push_test_gts()))
+def test_c29_bbox_sanity(path: Path):
+    gt = _load(path)
+    bad: list[str] = []
+    for n in gt.get("nodes") or []:
+        if "bbox" in n and not _bbox_ok(n["bbox"]):
+            bad.append(f"{n.get('id')}: bad bbox {n['bbox']}")
+        for i, m in enumerate(n.get("represents") or []):
+            if not _bbox_ok(m):
+                bad.append(f"{n.get('id')}: bad represents[{i}] {m}")
+    assert not bad, f"{path.name}: {bad}"
+
+
+# ---------------------------------------------------------------------------
+# C30 — Minimal self-loop rule in GT files: a worsens self-loop may exist
+# only on a node with no other edges.
+# ---------------------------------------------------------------------------
+@pytest.mark.blocking
+@pytest.mark.parametrize("path", list(all_push_test_gts()))
+def test_c30_minimal_self_loop(path: Path):
+    gt = _load(path)
+    edges = gt.get("edges") or []
+    connected = {x for e in edges for x in (str(e.get("source", "")), str(e.get("target", "")))
+                 if str(e.get("source", "")) != str(e.get("target", ""))}
+    bad = [str(e.get("source", "")) for e in edges
+           if str(e.get("source", "")) == str(e.get("target", "")) and str(e.get("source", "")) in connected]
+    assert not bad, f"{path.name}: redundant self-loops on {bad}"

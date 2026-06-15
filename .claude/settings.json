@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda activate *)",
+      "Bash(source ~/miniconda3/etc/profile.d/conda.sh)",
+      "Bash(source /opt/anaconda3/etc/profile.d/conda.sh)",
+      "Bash(source /opt/miniconda3/etc/profile.d/conda.sh)",
+      "Bash(pytest -c tests/pytest.ini *)",
+      "Bash(python -c \"import ast; ast.parse(open('main.py').read()); print('syntax OK')\")",
+      "Bash(python3 -c \"import ast; ast.parse(open('main.py').read()); print('syntax OK')\")"
+    ]
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "image_filename": "push_24_flooded_gas_station_sparks.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "Brown floodwater fills a gas-station forecourt to knee height; one corner of the canopy has partially collapsed with exposed wiring arcing sparks down into the water, the pumps are partially submerged, and a man wades through the water away from the station toward higher ground.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. Cross-class mutual-hazard rule: wiring_1 (leaking) \u2194 water_1 (hazardous_in_context) \u2014 arcing wiring electrifies the floodwater; the conductive water in turn expands the effective ground-fault surface back to the energized canopy hardware, multiplying short paths and arc points. Both directions emitted as worsens. The wiring's outgoing harm to the man flows through water_1 (electrified medium). Pump labeled pump_1 (schema: singular). Canopy_1 has partially collapsed with sagging; man is wading some distance from it but still within general fall radius \u2014 kept may_harm edge with note. Man actively escaping (at-risk Distress). EFFECT RELABEL (fluid -> already-hazardous target): water_1->pump_1 changed may_harm -> increases_risk_to per may_harm truth condition. GENERAL may_harm RULE applied (push_18 episode): canopy_1->pump_1 relabeled may_harm -> increases_risk_to (already-hazardous targets).",
+  "nodes": [
+    {
+      "id": "water_1",
+      "label": "water",
+      "state": "hazardous_in_context",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "wiring_1",
+      "label": "wiring",
+      "state": "leaking",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "canopy_1",
+      "label": "canopy",
+      "state": "collapsing",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "pump_1",
+      "label": "pump",
+      "state": "flooded",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "man_1",
+      "label": "man",
+      "state": "escaping",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "wiring_1",
+      "target": "water_1",
+      "effect": "worsens",
+      "via_state": "leaking"
+    },
+    {
+      "source": "water_1",
+      "target": "wiring_1",
+      "effect": "worsens",
+      "via_state": "hazardous_in_context"
+    },
+    {
+      "source": "water_1",
+      "target": "man_1",
+      "effect": "may_harm",
+      "via_state": "hazardous_in_context"
+    },
+    {
+      "source": "water_1",
+      "target": "pump_1",
+      "effect": "increases_risk_to",
+      "via_state": "hazardous_in_context"
+    },
+    {
+      "source": "canopy_1",
+      "target": "pump_1",
+      "effect": "increases_risk_to",
+      "via_state": "collapsing"
+    }
+  ]
+}

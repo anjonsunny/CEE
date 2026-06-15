@@ -131,7 +131,7 @@ The main prompt and Graph B prompt must assert the same schema rules, even if th
 - **Severity:** BLOCKING. **Status:** partial (substring fragments).
 
 ### B10 — Representative instancing convention present in both prompts
-- **What:** Both prompts state: model causally distinct entities individually plus salient foreground representatives of repeated patterns, up to roughly TEN nodes per scene; background multiplicity is summarized in prose, never instanced.
+- **What:** Both prompts state: model causally distinct entities individually plus salient foreground representatives of repeated patterns, up to roughly TEN nodes per scene; background multiplicity is summarized in prose, never instanced. EXCEPTION: people are COUNTED, not summarized — count individually when the exact number is readable from the image AND total people nodes stay at SIX or fewer; otherwise one representative per causal situation plus the count in prose; different causal situations never share a representative (push_36 + push_39 episodes). The conformance checker exempts person-like labels from redundant_instancing accordingly (O18).
 - **Why:** Wide aerial scenes (push_16: dozens of flooded houses) are unannotatable and unmeasurable without an instancing convention; the model and the GT must follow the same one or entity-count mismatches pollute the comparison.
 - **Severity:** BLOCKING. **Status:** partial (substring fragments).
 
@@ -244,8 +244,8 @@ Every GT file in `exports/ground_truth/candidates/` and `exports/ground_truth/ve
 - **What:** Same as C19 but shuffle the `nodes` list.
 - **Severity:** BLOCKING. **Status:** auto.
 
-### C22 — Fluid provenance heuristic (smoke/dust connected to producer)
-- **What:** For every hazardous fluid node with label `smoke` or `dust`, if the same GT contains at least one hazardous non-fluid entity in a producing state (`burning`, `spreading`, `collapsing` for smoke; `collapsing`, `collapsed`, `fallen` for dust), the fluid must have an incoming `increases_risk_to` edge from one of those producers. Restricted to smoke/dust — water and gas often have off-frame producers, so they're excluded from the heuristic.
+### C22 — Fluid provenance heuristic (smoke/dust/chemical/gas connected to producer)
+- **What:** For every hazardous fluid node with label `smoke`, `dust`, `chemical`, or `gas`, if the same GT contains at least one hazardous non-fluid entity in a producing state (`burning`/`spreading`/`collapsing` for smoke; `collapsing`/`collapsed`/`fallen` for dust; `leaking`/`fallen`/`crushed` for chemical and gas), the fluid must have an incoming `increases_risk_to` edge from one of those producers. Water stays excluded — its producers are usually off-frame. Chemical/gas added after push_38 (tanker leaking with a causally disconnected pool).
 - **Why:** Catches disjoint-graph GTs where the fluid floats disconnected from its visible producer (push_02/push_11 pattern).
 - **Severity:** WARN (heuristic; off-frame-producer cases are valid exceptions a human adjudicates). **Status:** auto.
 
@@ -269,9 +269,24 @@ Every GT file in `exports/ground_truth/candidates/` and `exports/ground_truth/ve
 - **Why:** Mechanical enforcement of the obstruction coupling rule (B9). Catches scene-furniture edges that would over-fire on controls.
 - **Severity:** WARN (rare legitimate exceptions adjudicated by human). **Status:** auto.
 
-### C27 — Fluid-to-hazardous effect labeling
-- **What:** No edge from a fluid-labeled source (water, mud, smoke, dust, gas, chemical) carries `may_harm` to a target that is already hazardous (flooded house, crushed car). The continuing escalation is `increases_risk_to`. `may_harm` from fluids is reserved for non-hazardous targets (people, animals, intact property).
-- **Why:** may_harm's truth condition says the target "does not itself become a hazard"; an already-inundated entity violates that by definition. Caught during push_16 verification.
+### C27 — may_harm never targets an already-hazardous entity (any source)
+- **What:** No edge from ANY source carries `may_harm` to a target that is already hazardous (flooded house, crushed car, collapsing structure). The continuing escalation is `increases_risk_to` (or mutual `worsens` when feeding goes both ways). `may_harm` is reserved for non-hazardous targets (people, animals, intact property).
+- **Why:** may_harm's truth condition says the target "does not itself become a hazard"; an already-hazardous target violates that by definition, whatever the source. Started as a fluid-only rule (push_16 verification); generalized after push_18 (a flying sign cannot may_harm a collapsing house). The generalized test immediately caught three more scenes (push_24, push_28, push_45).
+- **Severity:** BLOCKING. **Status:** auto. Checker rule: may_harm_hazardous_target (O3, O16).
+
+### C28 — Distress states on living beings only
+- **What:** No GT node carries an at-risk state (canonical or synonym: trapped, stranded, clinging, etc.) unless its label is a person or animal. Vehicles and structures are intact, converted hazards (crushed, flooded), or at-risk by Proximity; the person inside an endangered vehicle/building is a separate entity with their own state.
+- **Why:** Keeps the victim vocabulary biological. One physical object (car with driver) is deliberately two nodes with opposite trajectories: the car can only worsen toward hazard-hood, the person can only suffer toward distress. Settled during push_34 verification.
+- **Severity:** BLOCKING. **Status:** auto. Checker rule: distress_state_on_non_living (O17).
+
+### C29 — bbox sanity (Phase 1)
+- **What:** GT nodes may carry an optional normalized `bbox` [x1,y1,x2,y2] (0..1, x1<x2, y1<y2) and representatives an optional `represents` list of member boxes under the same constraint. Absent boxes are fine. Policy context: boxes on THINGS only; stuff gets at most a coarse extent; scene-wide boxes (>=90% of frame) are suppressed at display and unused for geometry; the GT editor save paths merge boxes back by node id (the form has no bbox fields) so Accept never drops them; test H-coverage of that merge is via the preserved-fields helper.
+- **Why:** Boxes pin ids to physical instances (today GT person_1 = model person_1 is an id-string coincidence) and make representation auditable. Phase 2 (IoU instance matching in Test 1) is parked until Stage 1 analysis.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### C30 — Minimal self-loop rule
+- **What:** A worsens self-loop may exist only on a hazardous node with NO other edges (the written shape-(c) placeholder). A node with real edges carrying a loop too is flagged. Checker rule: redundant_self_loop (O19).
+- **Why:** "Optional" loops poison measurement determinism (identical situations would differ on a coin flip), and the state word (burning, spreading) already carries the self-sustaining fact. Settled at push_53 (spot fires kept stale loops after the provenance sweep gave them real edges); the cleanup swept ten scenes including the push_02 golden (re-frozen).
 - **Severity:** BLOCKING. **Status:** auto.
 
 ### C21 — schema_version field present and matches current
@@ -296,6 +311,11 @@ The graph viewer encoding must remain consistent with node properties and edge e
 
 ### D3 — Every edge gets a class from {harm, propagate, structural, invalid}
 - **What:** Effect → class mapping: `{may_harm, threatens} → harm; {may_spread_to, increases_risk_to, worsens} → propagate; {blocks_access_to, isolates, exposes} → structural; invalid edges → invalid`.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### D5 — Synonym states classify as Distress
+- **What:** A person whose raw state is a preserved synonym (clinging, crouching) renders as at-risk Distress (orange), because classification canonicalizes the state first; the node label still shows the raw annotator word. A normal-state person with an incoming edge stays Proximity.
+- **Why:** push_20 episode: the classifier checked the raw word against the canonical Distress list, so a person clinging for life rendered as mere Proximity. Synonym preservation and color coding must compose.
 - **Severity:** BLOCKING. **Status:** auto.
 
 ### D4 — Legend matches the actual stylesheet
@@ -342,6 +362,16 @@ The Test 1 GT comparison pipeline must satisfy tier monotonicity and synonym/eff
 
 ### E7 — Mutual worsens edge accounting
 - **What:** A mutual-worsens pair (A→B worsens, B→A worsens) is counted as 2 edges, not 1, in both GT and candidate. Strict comparison requires both directions to be present in both for full credit.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### E12 — At-risk behavioral families separate correctly
+- **What:** canonicalize_state maps the entrapment family (stuck, stranded, clinging, struggling) to `trapped`, the threat-response family (crouching, ducking, hiding, surrendering) to `cowering`, and the flight family (escaping, running_away) to `fleeing`; across-family states never collapse together; all three canonicals are Distress states.
+- **Why:** stranded -> fleeing made no sense (near-opposites in motion: one cannot move, the other is moving fast). The single overloaded fleeing family also forced the model to mislabel, since the canonical list was its only choice. Split during push_36 verification; each family implies a different rescue (guide / extract / neutralize the threat).
+- **Severity:** BLOCKING. **Status:** auto.
+
+### E11 — worsens/increases_risk_to close pair
+- **What:** A candidate using one-way `worsens` where the GT has `increases_risk_to` (or vice versa) mismatches in strict tier but fully matches in soft tier. Third entry in EFFECT_CLOSE_PAIRS.
+- **Why:** "Fire worsens smoke" is correct common English with the causal direction right; only the reserved-vocabulary convention is broken (worsens = self-loop or mutual pairs). The strict-soft gap then cleanly separates "knew the physics, fumbled the vocabulary" from "got the physics wrong". Raised by Sunny during push_35 verification.
 - **Severity:** BLOCKING. **Status:** auto.
 
 ### E8 — Comparison determinism
@@ -436,6 +466,12 @@ End-to-end checks that exercise the full Qwen → GT pipeline.
 - **What:** Changing any node/edge field value in the GT editor (dropdown selection or text input) re-renders the graph view and text view immediately — without waiting for an add/delete/accept action, and without re-rendering the form (typing focus preserved). Implemented by the `gt_live_graph_refresh` callback targeting the `gt-graph-live` / `gt-text-live` containers.
 - **Why:** Regression test for the bug where a newly added edge only appeared in the graph after the next button click.
 - **Severity:** WARN. **Status:** partial (needs Dash test client; manual check: add edge, fill source/target, graph updates on selection).
+
+### H5 — Results layout keeps callback ids and section order
+- **What:** `serve_layout()` contains each of the 13 ids that `render_results` targets exactly once, and the Scene Analysis tab's collapsible sections appear in the MODULES.md order: Scene Reading → Causal Graphs → Model Self-Checks → Checks Against the Answer Key → Trust Reading.
+- **Why:** The 2026-06-11 layout pass grouped the crowded single-column results into `html.Details` sections. Dash callbacks fail silently-ish (runtime error on render) if a target id is dropped or duplicated during a layout reshuffle; this pins both the wiring and the conceptual grouping.
+- **How:** Walk the component tree of `serve_layout()`; count ids; collect `section-summary-title` spans and compare to the expected ordered list.
+- **Severity:** BLOCKING. **Status:** auto (tests/test_h_ui_workflow.py::test_h5_results_layout_keeps_callback_ids_and_sections).
 
 ---
 
@@ -676,9 +712,46 @@ The checker (`check_graph_rule_conformance` / `compute_rule_conformance` in main
 - **What:** compute_rule_conformance(graph_a, graph_b) sums violations across both graphs and tallies per-rule counts.
 - **Severity:** BLOCKING. **Status:** auto.
 
+### O13 — Redundant instancing flagged
+- **What:** A graph with more than four causally identical nodes (same label, state, and edge pattern) triggers `redundant_instancing`; three or fewer clones pass. Detects over-instancing, the mechanically checkable half of the representative-instancing rule (the model failed to notice causal sameness). Under-instancing (missing the one different house) needs the image or GT and stays human/M9.
+- **Severity:** BLOCKING (as a checker unit test). **Status:** auto.
+
+### O14 — Causally distinct nodes never flagged
+- **What:** Six houses in three different causal situations (flooded, collapsing with self-loops, intact-in-trajectory) produce no redundancy flag. Guards against the checker punishing legitimate diversity.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### O15 — Node budget cap
+- **What:** A graph exceeding ~12 nodes triggers `node_budget_exceeded` per the instancing convention's ten-node guidance.
+- **Severity:** BLOCKING. **Status:** auto.
+
 ### O12 — Conformance feeds the trust score
 - **What:** Once wired in (pending decision), violation counts lower the trust score with a documented weight; a clean answer is unaffected.
 - **Severity:** BLOCKING once active. **Status:** placeholder.
+
+---
+
+## P. Batch-level measurement
+
+The per-scene instruments get summed across a batch inside compute_ground_truth_report, producing the corpus-level tables Stage 1 analysis needs: which rules the model breaks and how often, and where the strict-soft gap is pure vocabulary.
+
+### P1 — Batch conformance tally
+- **What:** compute_ground_truth_report includes batch_rule_conformance: per-rule {violations, scenes} aggregated over ALL loaded runs (no GT needed), plus n_scenes, clean_scenes, total_violations, and the worst scenes ranked.
+- **Why:** Turns the per-scene M7 checker into the paper's measurement: "one_way_worsens fired in N of 70 scenes".
+- **Severity:** BLOCKING. **Status:** auto.
+
+### P2 — Close-pair swap totals
+- **What:** Per matched pair, count_close_pair_swaps counts model edges that miss the GT strictly but match softly via an effect close-pair substitution; the report sums these per pair name and per graph side (close_pair_swap_totals).
+- **Why:** Localizes the strict-soft gap to its cause: "physics right, vocabulary wrong", per pair (may_harm~threatens, worsens~increases_risk_to, blocks_access_to~isolates).
+- **Severity:** BLOCKING. **Status:** auto.
+
+### P4 — Conformance tally lives in the batch-native report
+- **What:** compute_pre_intervention_report (the report every batch run produces on completion, no GT involved) carries batch_rule_conformance, and render_report_markdown shows the per-rule table. Test 1 carries the same tally for convenience, but the batch-native placement is the canonical one.
+- **Why:** M7 is a Level 2 (no-answer-key) measurement per MODULES.md; coupling its batch view to Test 1 would make the violation table invisible until GTs exist, which is backwards: it is most useful BEFORE verification as the first look at model behavior. Raised by Sunny ("why combine it with Test 1 instead of batch run?").
+- **Severity:** BLOCKING. **Status:** auto.
+
+### P3 — Strict matches are never swaps
+- **What:** An identical graph compared to itself yields zero swaps; only soft-only matches with a differing close-pair effect count.
+- **Severity:** BLOCKING. **Status:** auto.
 
 ---
 

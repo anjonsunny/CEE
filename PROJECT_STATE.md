@@ -85,6 +85,43 @@ Each pathology now includes its training-mechanism explanation inline. Plain-lan
 
 ## 4. Methodology — what CEE+ measures
 
+### 4.0 Schema-as-instrument (paper contribution, recorded 2026-06-11)
+
+The schema rulebook is itself a measurement instrument, not formatting. The
+core move: engineer the output format so that answering CORRECTLY requires
+causal discrimination, then detect its absence mechanically.
+
+- Without the rules, a VLM produces fluent output with zero causal
+  commitment (generic `threatens` everywhere, fire+smoke as one blob,
+  role-based danger assignment, `may_harm` for any water contact). It looks
+  like reasoning and commits to nothing checkable.
+- Each rule forces one act of looking: the fluid effect triad forces
+  checking what each target IS; reach thresholds force checking where each
+  person STANDS; the mutual-hazard rule forces judging whether two hazards
+  feed each other or share a cause; fluid provenance forces noticing what
+  produces what; representative instancing forces grouping by causal
+  sameness and spotting the exception. Full index: the "reasoning map"
+  table in DESIGN_NOTES.md.
+- The **rule conformance checker** (M7, `compute_rule_conformance` in
+  main.py) runs the rulebook against the model's own graphs, no GT needed.
+  Each violation is a named, attributable diagnosis ("water may_harm an
+  already-flooded house"), not a similarity score. This is Layer 2 of the
+  failure taxonomy made operational, and "column one" of the per-scene
+  two-column result (column two = Stage 1 intervention shifts; the paper
+  hunts the model that passes column one and fails column two).
+- **Provenance of the rules (methodological honesty):** every rule encodes
+  an error actually committed during unconstrained annotation, several by
+  the careful human annotator (role-based heat edges in push_14, fire edges
+  across a street in push_15, smoke disconnected from its fire in push_02/
+  push_11). If careful humans fall into these associative habits without
+  the rules, the model does too. REGEN_LOG.md and DESIGN_NOTES.md document
+  each origin episode.
+- **Fairness:** all rules are disclosed to the model in its prompts, the GT
+  is annotated under identical rules, and the test suite mechanically
+  enforces that the two never drift (sections A/B/C). Remaining violations
+  are therefore attributable to the model, resolving the "evaluating the
+  prompt vs evaluating the model" tension by construction.
+
 ### 4.1 Pre-intervention pipeline (operational)
 
 For every scene, build **three causal pictures**:

@@ -1,0 +1,82 @@
+{
+  "image_filename": "push_69_collapsed_confined_space.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "Inside a partially collapsed brick warehouse, a man's face and one arm are visible deep in a tight gap between fallen beams and rubble, his expression visibly distressed; dust hangs in the air around him, and a search-and-rescue worker in helmet and headlamp crouches at the gap with a flashlight.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. SUFFOCATING STATE TEST + dust as engulfing medium (dust physically fills the confined space containing a distress victim). Schema fix: victim_1/person re-id'd to person_1. Realistic intervention is edge-severance (extract person from the gap), not removing the dust. FLUID PROVENANCE applied: building_1\u2192dust_1 (increases_risk_to).",
+  "nodes": [
+    {
+      "id": "building_1",
+      "label": "building",
+      "state": "collapsing",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "debris_1",
+      "label": "debris",
+      "state": "fallen",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "dust_1",
+      "label": "dust",
+      "state": "engulfing",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "person_1",
+      "label": "person",
+      "state": "suffocating",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "rescuer_1",
+      "label": "rescuer",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "building_1",
+      "target": "person_1",
+      "effect": "may_harm",
+      "via_state": "collapsing"
+    },
+    {
+      "source": "building_1",
+      "target": "rescuer_1",
+      "effect": "may_harm",
+      "via_state": "collapsing"
+    },
+    {
+      "source": "debris_1",
+      "target": "person_1",
+      "effect": "may_harm",
+      "via_state": "fallen"
+    },
+    {
+      "source": "dust_1",
+      "target": "person_1",
+      "effect": "may_harm",
+      "via_state": "engulfing"
+    },
+    {
+      "source": "dust_1",
+      "target": "rescuer_1",
+      "effect": "may_harm",
+      "via_state": "engulfing"
+    },
+    {
+      "source": "building_1",
+      "target": "dust_1",
+      "effect": "increases_risk_to",
+      "via_state": "collapsing"
+    }
+  ]
+}

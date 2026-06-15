@@ -41,6 +41,16 @@ front row; dozens of similar flooded homes extend inland"). Never instance
 two entities whose causal structure is identical unless both are individually
 salient. A wide aerial flood scene with forty houses gets a handful of
 representative nodes, not forty.
+EXCEPTION — people are COUNTED, not summarized: every individually
+distinguishable person (and animal) gets their own node, because rescue
+capacity depends on the count ("three stranded" vs "five stranded" are
+different operations). Threshold: count individually when the exact number
+is readable from the image AND the scene's total people nodes stay at SIX
+or fewer; otherwise (an estimate, a crowd, or more than six) use one
+representative per causal situation and state the count in prose. The
+count is never lost — below the threshold it lives in the node list,
+above it in the words. People in different causal situations never share
+a representative at any crowd size.
 
 Hazard-bearing states (threat-producing — entity is a SOURCE of harm):
   burning, burnt, collapsed, collapsing, fallen, crushed, flooded, leaking,
@@ -71,7 +81,20 @@ dust, failure complete. When the image is ambiguous, default to
 not by upgrading the state to `collapsing`.
 
 At-risk states (victim — entity is a TARGET of harm, in distress):
-  injured, bleeding, fleeing, drowning, suffocating, unconscious
+  injured, bleeding, fleeing, trapped, cowering, drowning, suffocating,
+  unconscious
+**Three behavioral families.** `fleeing` = in active flight away from danger;
+`trapped` = cannot move, circumstance holds them (stranded on a roof, wedged
+in rubble, clinging against a current); `cowering` = could move but a direct
+threat pins them in place (crouching behind cover, hands raised). They imply
+different rescues: guide the fleeing, extract the trapped, neutralize the
+threat for the cowering.
+
+**Living beings only.** At-risk states describe people and animals. Vehicles
+and structures are never in distress: they are intact, converted hazards
+(crushed, flooded), or at-risk by Proximity. A person inside an endangered
+vehicle or building is a SEPARATE entity with their own state (visible
+occupant as person_N; unseen occupant only via the inferred-entity policy).
 
 Normal states:
   intact, standing, upright, whole, dry, sealed, uninjured, healthy,
@@ -116,7 +139,7 @@ them distinct.
 Each recommendation quad uses exactly one `effect` label. Pick the MOST SPECIFIC applicable label. `threatens` is a last resort — use only when no other label applies AND the danger is proximate and unavoidable.
 
 - may_spread_to      — hazard can propagate via physical contiguity (fire, flood, disease)
-- may_harm           — threat can injure OR is currently injuring the affected entity, which does not itself become a hazard. Tense is read from the target's state: an at-risk Distress target (drowning, suffocating, bleeding) means the harm is actualized and ongoing; a normal-state target means it is imminent or potential.
+- may_harm           — threat can injure OR is currently injuring the affected entity, which does not itself become a hazard. Tense is read from the target's state: an at-risk Distress target (drowning, suffocating, bleeding) means the harm is actualized and ongoing; a normal-state target means it is imminent or potential. NEVER use may_harm on a target that is ALREADY hazardous (a collapsing house, a flooded car) — whatever the source, that is escalation of an existing hazard: use increases_risk_to (or mutual worsens when the feeding goes both ways).
 - blocks_access_to   — physical obstruction preventing reach
 - isolates           — cuts an entity off from escape or resources
 - exposes            — protective barrier removed or breached
@@ -405,7 +428,12 @@ AT_RISK_STATES = {
     # source. Goes in `at_risk_objects` block, not `threats`. Must appear as
     # affected_object of some hazard in recommendations; must NOT appear as
     # the `threat` slot of any quad.
-    "injured", "bleeding", "fleeing", "drowning", "suffocating", "unconscious",
+    # Three behavioral families besides the medical ones: fleeing (in active
+    # flight), trapped (cannot move; circumstance holds them), cowering
+    # (could move, but a direct threat pins them in place). Promoted from an
+    # overloaded fleeing family after the push_36 stranded episode.
+    "injured", "bleeding", "fleeing", "trapped", "cowering",
+    "drowning", "suffocating", "unconscious",
 }
 
 NORMAL_STATES = {
@@ -424,11 +452,13 @@ GRAPH_B_PROMPT = """You are extracting the causal graph that explains how hazard
 
 ## State vocabulary (must match prior analysis verbatim)
 
-Representative instancing: in wide scenes with many similar entities, the graph models causally distinct entities individually plus salient foreground representatives of repeated patterns, up to roughly TEN nodes; background multiplicity is summarized in prose, never instanced. Do not add nodes beyond the detected_objects supplied.
+Representative instancing: in wide scenes with many similar entities, the graph models causally distinct entities individually plus salient foreground representatives of repeated patterns, up to roughly TEN nodes; background multiplicity is summarized in prose, never instanced. EXCEPTION: people are COUNTED, not summarized — count individually when the exact number is readable AND total people nodes stay at SIX or fewer; otherwise one representative per causal situation plus the count in prose; people in different causal situations never share a representative. Do not add nodes beyond the detected_objects supplied.
 
 Hazard-bearing states (entity is a SOURCE of harm): burning, burnt, collapsed, collapsing, fallen, crushed, flooded, leaking, approaching, charging, aiming, coiled, rabid, armed, striking, rising, spreading, billowing, seeping, escalating, engulfing, hazardous_in_context. `engulfing` requires the medium to physically contain a target that is in an at-risk Distress state (drowning, suffocating, trapped); `hazardous_in_context` is the last-resort fallback when no specific state applies. `collapsing` vs `collapsed`: distinct states — `collapsing` only with positive visual evidence of ongoing failure (dust in the air, mid-fall debris, tilted/leaning structure, hanging slabs); `collapsed` for settled rubble; when ambiguous default to `collapsed` and express residual shift risk with a `worsens` self-loop.
 
-At-risk states (entity is a TARGET of harm — Distress kind): injured, bleeding, fleeing, drowning, suffocating, unconscious. At-risk nodes have `hazardous: false` and `at_risk: true`; they may be the TARGET of edges but never the SOURCE.
+At-risk states (entity is a TARGET of harm — Distress kind): injured, bleeding, fleeing, trapped, cowering, drowning, suffocating, unconscious. Behavioral families: fleeing = in active flight; trapped = cannot move (stranded, wedged, clinging); cowering = a direct threat pins them in place. At-risk nodes have `hazardous: false` and `at_risk: true`; they may be the TARGET of edges but never the SOURCE.
+
+**Living beings only.** At-risk states describe people and animals; vehicles and structures are never in distress (they are intact, converted hazards, or at-risk by Proximity), and a person inside an endangered vehicle/building is a separate entity.
 
 Normal-state entities that are nonetheless exposed to an active hazard are at-risk by Proximity. They appear with `at_risk: true` in the graph (because the operator must protect them) but their state stays normal. They MUST be the TARGET of at least one edge from a hazard.
 
@@ -446,7 +476,7 @@ Normal states: intact, standing, upright, whole, dry, sealed, uninjured, healthy
 
 Each edge label = exactly one of (use the most specific applicable):
 - may_spread_to      — hazard propagates via physical contiguity
-- may_harm           — threat can injure or is currently injuring the target without the target itself becoming a hazard; tense is read from the target's state (at-risk Distress = harm actualized and ongoing; normal state = imminent/potential)
+- may_harm           — threat can injure or is currently injuring the target without the target itself becoming a hazard; tense is read from the target's state (at-risk Distress = harm actualized and ongoing; normal state = imminent/potential); NEVER on a target that is already hazardous — whatever the source, that is increases_risk_to (or mutual worsens)
 - blocks_access_to   — physical obstruction
 - isolates           — cuts off escape or resources
 - exposes            — protective barrier removed
@@ -1961,17 +1991,16 @@ STATE_SYNONYMS: dict[str, str] = {
     "toppled": "fallen", "down": "fallen",
     "knocked_over": "fallen", "knocked_down": "fallen",
     "uprooted": "fallen", "fallen_down": "fallen",
-    # Person-in-distress variants. "struggling" is what the model spontaneously
-    # emits for someone fighting against floodwater / debris / fire — closest
-    # legitimate vocab term is "fleeing" (active distress + attempt to escape).
-    # Mild semantic stretch; revisit when at-risk states get their own category.
-    "struggling": "fleeing", "stuck": "fleeing", "trapped": "fleeing",
-    # Defensive distress responses to imminent threat — body not necessarily
-    # translating across space, but actively responding. Same conceptual umbrella
-    # as `stuck`/`trapped` (above): person engaged with an immediate threat,
-    # not in ordinary stationary state.
-    "crouching": "fleeing", "cowering": "fleeing", "ducking": "fleeing",
-    "hiding": "fleeing", "surrendering": "fleeing", "clinging": "fleeing",
+    # Person-in-distress variants, three behavioral families (the "revisit"
+    # promised in an earlier comment happened after the push_36 stranded
+    # episode — stranded -> fleeing made no sense, near-opposites in motion):
+    # ENTRAPMENT — cannot move; circumstance holds them (trapped is canonical).
+    "stuck": "trapped", "stranded": "trapped",
+    "clinging": "trapped", "struggling": "trapped",
+    # THREAT RESPONSE — could move, but a direct threat pins them in place
+    # (cowering is canonical).
+    "crouching": "cowering", "ducking": "cowering",
+    "hiding": "cowering", "surrendering": "cowering",
     # Smoke production
     "smoking": "billowing", "smoky": "billowing",
     "spewing_smoke": "billowing",
@@ -1988,9 +2017,15 @@ STATE_SYNONYMS: dict[str, str] = {
 
 # Effect close-pairs — pairs where truth conditions overlap meaningfully.
 # NOT loose families; only semantically near-synonymous effects.
+# worsens/increases_risk_to: both say "source escalates target". Strict tier
+# separates them (worsens is reserved for self-loops and mutual pairs, a
+# disclosed rule), but a model writing the common-English "fire worsens
+# smoke" for one-way escalation has the causal direction right and only the
+# vocabulary wrong — soft tier credits that.
 EFFECT_CLOSE_PAIRS: list[set[str]] = [
     {"may_harm", "threatens"},
     {"blocks_access_to", "isolates"},
+    {"worsens", "increases_risk_to"},
 ]
 
 
@@ -3200,6 +3235,8 @@ RC_PERSONISH_LABELS = {
     "person", "man", "woman", "child", "firefighter", "officer", "rescuer",
     "homeowner", "driver", "worker", "resident", "responder", "victim",
     "bystander", "paramedic", "clerk", "customer", "family",
+    "infant", "baby", "teenager", "boy", "girl", "patient", "nurse",
+    "doctor", "medic", "farmer", "shopkeeper", "vendor",
     "dog", "cow", "horse", "bull", "animal",
 }
 RC_ACTIVE_FLUID_STATES = {"rising", "spreading", "engulfing", "seeping", "billowing", "leaking"}
@@ -3245,9 +3282,25 @@ def check_graph_rule_conformance(graph: dict[str, Any], graph_name: str) -> list
         if hazardous and state in AT_RISK_STATES:
             violation("hazardous_and_at_risk",
                       f"{nid}: at-risk state '{state}' marked hazardous")
+        if state in AT_RISK_STATES and not is_person(n):
+            violation("distress_state_on_non_living",
+                      f"{nid} ({n.get('label')}): at-risk states describe living "
+                      f"beings; a vehicle/structure is intact, a converted hazard, "
+                      f"or at-risk by Proximity — never in distress")
         if hazardous and nid not in touched:
             violation("hazardous_node_no_edges",
                       f"{nid}: hazardous with zero edges (needs a target or a worsens self-loop)")
+
+    # Minimal self-loop rule: the worsens self-loop is the placeholder for an
+    # otherwise edge-less hazard. A node with real edges must not also carry
+    # one — the state word already says the hazard is self-sustaining.
+    nonloop_connected = {x for e in edges for x in (str(e.get("source", "")), str(e.get("target", "")))
+                         if str(e.get("source", "")) != str(e.get("target", ""))}
+    for e in edges:
+        s = str(e.get("source", ""))
+        if s == str(e.get("target", "")) and s in nonloop_connected:
+            violation("redundant_self_loop",
+                      f"{s}: self-loop alongside real edges; the loop is only the placeholder for an otherwise edge-less hazard")
 
     # Edge-level rules
     for e in edges:
@@ -3288,12 +3341,16 @@ def check_graph_rule_conformance(graph: dict[str, Any], graph_name: str) -> list
             violation("one_way_worsens",
                       f"{src_id}->{tgt_id}: worsens without the reverse edge; asymmetric escalation is increases_risk_to")
 
-        # Fluid edge effect triad, keyed to the target.
+        # may_harm never targets an already-hazardous entity, whatever the
+        # source (generalized from the fluid triad after push_18: a flying
+        # sign cannot may_harm a collapsing house; it escalates it).
+        if (effect == "may_harm" and src_id != tgt_id
+                and bool(tgt.get("hazardous", False))):
+            violation("may_harm_hazardous_target",
+                      f"{src_id}->{tgt_id}: target already hazardous; use increases_risk_to (or mutual worsens)")
+
+        # Fluid edge effect triad, person side.
         if is_fluid(src) and src_id != tgt_id:
-            tgt_hazardous = bool(tgt.get("hazardous", False))
-            if effect == "may_harm" and tgt_hazardous:
-                violation("fluid_may_harm_hazardous_target",
-                          f"{src_id}->{tgt_id}: target already hazardous; use increases_risk_to")
             if effect in ("increases_risk_to", "may_spread_to") and is_person(tgt):
                 violation("fluid_wrong_effect_for_person",
                           f"{src_id}->{tgt_id}: person/animal target takes may_harm (or isolates)")
@@ -3331,6 +3388,42 @@ def check_graph_rule_conformance(graph: dict[str, Any], graph_name: str) -> list
             violation("smoke_superset_violation",
                       f"{src_id} harms {sorted(skipped)} but its fluid {tgt_id} does not")
 
+    # Representative instancing: a graph full of causal clones means the
+    # model failed to notice sameness (grouping by causal similarity IS
+    # causal reasoning). Signature = label + state + edge pattern, with
+    # peers identified by label so clone-of-clone groups collapse together.
+    def causal_signature(nid: str, n: dict[str, Any]) -> tuple:
+        label = str(n.get("label", "")).strip().lower()
+        state = canon(n.get("state"))
+        pattern = []
+        for e in edges:
+            s, t = str(e.get("source", "")), str(e.get("target", ""))
+            eff = str(e.get("effect", "")).strip()
+            if s == nid:
+                peer = nodes.get(t, {})
+                pattern.append(("out", eff, str(peer.get("label", "")).lower(),
+                                "self" if t == nid else ""))
+            elif t == nid:
+                peer = nodes.get(s, {})
+                pattern.append(("in", eff, str(peer.get("label", "")).lower()))
+        return (label, state, tuple(sorted(pattern)))
+
+    sig_groups: dict[tuple, list[str]] = {}
+    for nid, n in nodes.items():
+        if is_person(n):
+            continue  # people are counted, not summarized — never clone-flagged
+        sig_groups.setdefault(causal_signature(nid, n), []).append(nid)
+    for sig, members in sig_groups.items():
+        if len(members) > 4:
+            violation("redundant_instancing",
+                      f"{len(members)} causally identical nodes ({sig[0]}/{sig[1]}): "
+                      f"{sorted(members)[:6]}... — model a few representatives and "
+                      f"summarize the rest in prose")
+    if len(nodes) > 12:
+        violation("node_budget_exceeded",
+                  f"{len(nodes)} nodes; the instancing convention caps a scene at "
+                  f"roughly ten (causally distinct entities plus salient representatives)")
+
     return out
 
 
@@ -3348,6 +3441,74 @@ def compute_rule_conformance(graph_a: dict[str, Any], graph_b: dict[str, Any]) -
         "violations": violations,
         "n_violations": len(violations),
         "by_rule": by_rule,
+    }
+
+
+def count_close_pair_swaps(model_graph: dict[str, Any], gt_graph: dict[str, Any]) -> dict[str, int]:
+    """Count model edges that miss the GT in strict tier but match it in soft
+    tier purely through an effect close-pair substitution (e.g. the model
+    wrote `worsens` where the GT has `increases_risk_to`). These are the
+    "physics right, vocabulary wrong" slips; the strict-soft gap localized
+    to its cause. Returns {"effect_a~effect_b": count}."""
+    model_nodes = {n.get("id", ""): n for n in model_graph.get("nodes") or []}
+    gt_nodes = {n.get("id", ""): n for n in gt_graph.get("nodes") or []}
+    gt_edges = gt_graph.get("edges") or []
+
+    def strict_key(e: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (str(e.get("source", "")), str(e.get("via_state", "")),
+                str(e.get("effect", "")), str(e.get("target", "")))
+
+    gt_strict = {strict_key(e) for e in gt_edges}
+    gt_by_fuzzy: dict[tuple, list[dict[str, Any]]] = {}
+    for e in gt_edges:
+        gt_by_fuzzy.setdefault(_fuzzy_edge_key(e, gt_nodes), []).append(e)
+
+    swaps: dict[str, int] = {}
+    for e in model_graph.get("edges") or []:
+        if strict_key(e) in gt_strict:
+            continue  # strict match — no swap involved
+        for g in gt_by_fuzzy.get(_fuzzy_edge_key(e, model_nodes), []):
+            ge, me = str(g.get("effect", "")).strip(), str(e.get("effect", "")).strip()
+            if ge != me:
+                for pair in EFFECT_CLOSE_PAIRS:
+                    if {ge, me} <= pair:
+                        name = "~".join(sorted(pair))
+                        swaps[name] = swaps.get(name, 0) + 1
+                        break
+                break
+    return swaps
+
+
+def compute_batch_rule_conformance(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate M7 rule conformance across a batch of runs. This is the
+    corpus-level tally: which rulebook rules does the model break, how often,
+    and in how many scenes. Needs no GT."""
+    per_scene: list[dict[str, Any]] = []
+    by_rule: dict[str, dict[str, int]] = {}
+    clean = 0
+    for r in runs:
+        rc = compute_rule_conformance(r.get("causal_graph") or {}, r.get("graph_b") or {})
+        n = rc["n_violations"]
+        if n == 0:
+            clean += 1
+        per_scene.append({
+            "image_filename": str(r.get("image_filename", "")),
+            "run_id": str(r.get("run_id", "")),
+            "n_violations": n,
+            "by_rule": rc["by_rule"],
+        })
+        for rule, cnt in rc["by_rule"].items():
+            agg = by_rule.setdefault(rule, {"violations": 0, "scenes": 0})
+            agg["violations"] += cnt
+            agg["scenes"] += 1
+    per_scene.sort(key=lambda s: -s["n_violations"])
+    return {
+        "n_scenes": len(per_scene),
+        "clean_scenes": clean,
+        "total_violations": sum(s["n_violations"] for s in per_scene),
+        "by_rule": by_rule,
+        "worst_scenes": per_scene[:5],
+        "per_scene": per_scene,
     }
 
 
@@ -3881,10 +4042,16 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
             "trust_score_median": _med(lambda r: r.get("pre_intervention_trust", {}).get("score")),
         })
 
+    # M7 batch tally — rulebook violations across every run, disaster or not.
+    # Level 2 measurement (no GT needed), so it lives in the batch-native
+    # report rather than only inside Test 1.
+    batch_rule_conformance = compute_batch_rule_conformance(runs)
+
     return {
         "n_runs": n_runs,
         "n_runs_total": n_total,
         "n_runs_non_disaster": len(non_disaster_runs),
+        "batch_rule_conformance": batch_rule_conformance,
         "non_disaster_run_ids": [r.get("run_id", "?") for r in non_disaster_runs],
         "trust_distribution": trust_dist,
         "metric_distributions": metric_dists,
@@ -4009,15 +4176,16 @@ CYTOSCAPE_STYLESHEET = [
         "border-width": 5,
     }},
     # at-risk Distress entity (own state is at-risk vocab — drowning,
-    # suffocating, fleeing, injured, bleeding, unconscious). Orange border.
+    # suffocating, fleeing, injured, bleeding, unconscious). Deep sky-blue
+    # border (victims, clearly distinct from the red hazard family).
     {"selector": "node.at-risk-distress", "style": {
-        "border-color": "#ea580c",
+        "border-color": "#0369a1",
         "border-width": 5,
     }},
     # at-risk Proximity entity (normal-state entity exposed to a hazard
-    # via incoming edge). Yellow border.
+    # via incoming edge). Light sky-blue border.
     {"selector": "node.at-risk-proximity", "style": {
-        "border-color": "#ca8a04",
+        "border-color": "#7dd3fc",
         "border-width": 4,
     }},
     # bystander / unaffected (non-hazardous, no incoming hazard edge,
@@ -4094,7 +4262,8 @@ GT_HAZARD_STATES = [
     "engulfing", "hazardous_in_context",
 ]
 GT_AT_RISK_STATES = [
-    "injured", "bleeding", "fleeing", "drowning", "suffocating", "unconscious",
+    "injured", "bleeding", "fleeing", "trapped", "cowering",
+    "drowning", "suffocating", "unconscious",
 ]
 GT_NORMAL_STATES = [
     "intact", "standing", "upright", "whole", "dry", "sealed",
@@ -4174,9 +4343,13 @@ def graph_to_cytoscape_elements(graph: dict[str, Any]) -> list[dict[str, Any]]:
         at_risk_flag = bool(n.get("at_risk", False))
         state = n.get("state", "unknown")
         label = f"{n.get('label', '')}\n({state})"
+        # Canonicalize for CLASSIFICATION only — the label keeps the raw word
+        # (clinging, crouching) the annotator chose; the Distress check must
+        # see the canonical (fleeing), or synonym states render as Proximity.
+        canonical_state = canonicalize_state(str(state).strip())
 
         # Class priority: inferred > hazardous (threat/orphan) >
-        # at-risk-distress (state in AT_RISK_STATES) >
+        # at-risk-distress (canonical state in AT_RISK_STATES) >
         # at-risk-proximity (at_risk flag OR has incoming hazard edge) >
         # bystander.
         if inferred:
@@ -4185,7 +4358,7 @@ def graph_to_cytoscape_elements(graph: dict[str, Any]) -> list[dict[str, Any]]:
             cls = "orphan-threat"
         elif hazardous:
             cls = "threat"
-        elif state in AT_RISK_STATES:
+        elif canonical_state in AT_RISK_STATES:
             cls = "at-risk-distress"
         elif at_risk_flag or nid in incoming_present:
             cls = "at-risk-proximity"
@@ -4531,8 +4704,8 @@ def _graph_legend() -> html.Details:
                     html.Div([
                         html.Span([_legend_node_swatch("#dc2626"), "Threat"], style=row_style),
                         html.Span([_legend_node_swatch("#dc2626", "dashed"), "Orphan threat"], style=row_style),
-                        html.Span([_legend_node_swatch("#ea580c"), "At-risk Distress"], style=row_style),
-                        html.Span([_legend_node_swatch("#ca8a04", "solid", 4), "At-risk Proximity"], style=row_style),
+                        html.Span([_legend_node_swatch("#0369a1"), "At-risk Distress"], style=row_style),
+                        html.Span([_legend_node_swatch("#7dd3fc", "solid", 4), "At-risk Proximity"], style=row_style),
                         html.Span([_legend_node_swatch("#94a3b8", "solid", 2), "Bystander"], style=row_style),
                         html.Span([_legend_node_swatch("#8b5cf6", "dashed", 4), "Inferred (presumed)"], style=row_style),
                         html.Span([_legend_node_swatch("#737373", "dotted", 3), "Unresolved"], style=row_style),
@@ -5550,6 +5723,26 @@ def render_report_markdown(
             lines.append(f"- **{o['label']}**: `{o['run_id']}` ({o['value']})")
         lines.append("")
 
+    # M7 rule conformance across the batch — Level 2 measurement, no GT.
+    brc = report.get("batch_rule_conformance") or {}
+    if brc.get("n_scenes"):
+        lines.append("## Rule conformance (M7 — rulebook applied to the model's own graphs, no GT)")
+        lines.append("")
+        dirty = brc.get("n_scenes", 0) - brc.get("clean_scenes", 0)
+        lines.append(
+            f"- **{brc.get('total_violations', 0)}** violation(s) in **{dirty}** of "
+            f"{brc.get('n_scenes', 0)} scenes ({brc.get('clean_scenes', 0)} clean)"
+        )
+        lines.append("")
+        if brc.get("by_rule"):
+            lines.append("| Rule | Violations | Scenes |")
+            lines.append("|---|---|---|")
+            for rule, agg in sorted(brc["by_rule"].items(), key=lambda kv: -kv[1]["violations"]):
+                lines.append(f"| {rule} | {agg['violations']} | {agg['scenes']} |")
+        else:
+            lines.append("No rule violations anywhere in the batch.")
+        lines.append("")
+
     # Pathology footprint rollup — shown before per-run table so readers see
     # the batch-level picture before drilling in.
     pr = report.get("pathology_rollup") or {}
@@ -5815,6 +6008,27 @@ def _filter_empty(cand: dict[str, Any]) -> dict[str, Any]:
         and str(e.get("effect", "")).strip()
     ]
     return out
+
+
+# GT bbox support (Phase 1, design parked-then-approved 2026-06-11): nodes may
+# carry an optional normalized bbox [x1, y1, x2, y2] (0..1) and representative
+# nodes an optional "represents" list of member bboxes. The GT editor's form
+# does not show these fields, so every save path must merge them back from the
+# loaded candidate by node id or they silently vanish on Accept.
+GT_PRESERVED_NODE_FIELDS = ("bbox", "represents")
+
+
+def merge_preserved_node_fields(
+    nodes: list[dict[str, Any]], base_nodes: list[dict[str, Any]] | None
+) -> list[dict[str, Any]]:
+    by_id = {str(b.get("id", "")): b for b in (base_nodes or [])}
+    for n in nodes:
+        src = by_id.get(str(n.get("id", "")))
+        if src:
+            for k in GT_PRESERVED_NODE_FIELDS:
+                if k in src and k not in n:
+                    n[k] = src[k]
+    return nodes
 
 
 def save_verified_gt(candidate: dict[str, Any], original_path: str | Path) -> Path:
@@ -6631,6 +6845,10 @@ def compute_ground_truth_report(verified_folder: str, batch_folder: str) -> dict
             "b_gt_matched_soft": int(cmp_b_soft.get("matched", 0)),
             "a_gt_matched_topo": int(cmp_a_topo.get("matched", 0)),
             "b_gt_matched_topo": int(cmp_b_topo.get("matched", 0)),
+            # Close-pair vocabulary swaps: soft-matched-only edges whose miss
+            # is exactly an effect close-pair substitution.
+            "a_close_pair_swaps": count_close_pair_swaps(graph_a, gt_graph),
+            "b_close_pair_swaps": count_close_pair_swaps(graph_b, gt_graph),
         })
 
     if not pairs:
@@ -6720,6 +6938,17 @@ def compute_ground_truth_report(verified_folder: str, batch_folder: str) -> dict
             f"Graph B diverges from reference even structurally. {summary_line}. Model's independent reasoning misses or misattributes core causal links.{matcher_note}",
         )
 
+    # Batch-level M7 tally (needs no GT — runs over ALL loaded runs, matched
+    # or not) and corpus totals of close-pair vocabulary swaps (needs GT —
+    # summed over matched pairs only).
+    batch_conformance = compute_batch_rule_conformance(runs)
+    swap_totals: dict[str, dict[str, int]] = {"graph_a": {}, "graph_b": {}}
+    for p in pairs:
+        for side in ("a", "b"):
+            for name, cnt in (p.get(f"{side}_close_pair_swaps") or {}).items():
+                bucket = swap_totals[f"graph_{side}"]
+                bucket[name] = bucket.get(name, 0) + cnt
+
     return {
         "n_pairs": len(pairs),
         "n_verified": len(gt_files),
@@ -6730,6 +6959,8 @@ def compute_ground_truth_report(verified_folder: str, batch_folder: str) -> dict
         "by_category": category_breakdown,
         "verdict_kind": verdict_kind,
         "verdict_text": verdict_text,
+        "batch_rule_conformance": batch_conformance,
+        "close_pair_swap_totals": swap_totals,
     }
 
 
@@ -12308,7 +12539,9 @@ def gt_accept_or_reject(
         cand = dict(base or {})
         cand["caption"] = caption if caption is not None else cand.get("caption", "")
         cand["annotator_notes"] = notes if notes is not None else cand.get("annotator_notes", "")
-        cand["nodes"] = nodes
+        # The form has no bbox/represents fields — merge them back by node id
+        # so Accept never silently drops box data.
+        cand["nodes"] = merge_preserved_node_fields(nodes, (base or {}).get("nodes"))
         cand["edges"] = edges
         try:
             saved = save_verified_gt(cand, selected_path)
@@ -12501,7 +12734,7 @@ def gt_mutate_working(
         # An add/delete fired with n_clicks=0 (button just mounted) — ignore
         raise dash.exceptions.PreventUpdate
 
-    new_working["nodes"] = nodes
+    new_working["nodes"] = merge_preserved_node_fields(nodes, (working or {}).get("nodes"))
     new_working["edges"] = edges
     return new_working
 
@@ -12537,8 +12770,38 @@ def gt_render_detail(working, allow_inferred_value, path):
     # in candidates/, experiments/, or exports/runs/.
     image_path = _find_gt_image(image_filename, Path(path).parent) if image_filename else None
     if image_path and image_path.exists():
-        mime = MIME_BY_EXT.get(image_path.suffix.lower(), "image/jpeg")
-        data_url = image_bytes_to_data_url(image_path.read_bytes(), mime)
+        boxed_nodes = [n for n in cand.get("nodes", []) if n.get("bbox")]
+        if boxed_nodes:
+            # GT bbox overlay (Phase 1): normalized [x1,y1,x2,y2] -> pixels.
+            # Scene-wide boxes (>= 90% of frame) are suppressed by policy —
+            # a rectangle around "all the flood water" carries no geometry.
+            img = Image.open(image_path).convert("RGB")
+            objs: list[dict[str, Any]] = []
+            for n in boxed_nodes:
+                try:
+                    x1, y1, x2, y2 = [float(v) for v in n["bbox"]]
+                except Exception:
+                    continue
+                if (x2 - x1) * (y2 - y1) >= 0.9:
+                    continue
+                objs.append({"label": str(n.get("id", "")),
+                             "bbox": [x1 * img.width, y1 * img.height,
+                                      x2 * img.width, y2 * img.height]})
+                for m in n.get("represents") or []:
+                    try:
+                        mx1, my1, mx2, my2 = [float(v) for v in m]
+                    except Exception:
+                        continue
+                    objs.append({"label": f"~{n.get('id', '')}",
+                                 "bbox": [mx1 * img.width, my1 * img.height,
+                                          mx2 * img.width, my2 * img.height]})
+            canvas = draw_bboxes(img, objs, "#0ea5e9")
+            buf = io.BytesIO()
+            canvas.save(buf, format="PNG")
+            data_url = image_bytes_to_data_url(buf.getvalue())
+        else:
+            mime = MIME_BY_EXT.get(image_path.suffix.lower(), "image/jpeg")
+            data_url = image_bytes_to_data_url(image_path.read_bytes(), mime)
         image_block = html.Img(src=data_url, className="embedded-preview")
     else:
         image_block = html.Div(f"(image not found: {image_filename})", className="empty-state")
@@ -12813,6 +13076,45 @@ def make_gt_test_results_panel(report: dict[str, Any]) -> html.Div:
     ]
     if cat_section is not None:
         children.append(cat_section)
+
+    # Batch-level rule conformance (M7 over the whole batch, no GT needed).
+    brc = report.get("batch_rule_conformance") or {}
+    if brc.get("n_scenes"):
+        rule_rows = [
+            html.Div(
+                [
+                    html.Span(rule, style={"fontWeight": "600", "marginRight": "8px"}),
+                    html.Span(f"{agg['violations']} violation(s) across {agg['scenes']} scene(s)"),
+                ],
+                style={"fontSize": "12px", "padding": "2px 0"},
+            )
+            for rule, agg in sorted(brc.get("by_rule", {}).items(), key=lambda kv: -kv[1]["violations"])
+        ] or [html.Div("No rule violations anywhere in the batch.", style={"color": "#15803d", "fontWeight": "600"})]
+        children.extend([
+            html.Div(
+                f"Rule conformance across batch — {brc.get('total_violations', 0)} violation(s) in "
+                f"{brc.get('n_scenes', 0) - brc.get('clean_scenes', 0)} of {brc.get('n_scenes', 0)} scenes "
+                f"({brc.get('clean_scenes', 0)} clean)",
+                className="report-section-label",
+            ),
+            html.Div(rule_rows, className="report-section"),
+        ])
+
+    # Close-pair vocabulary swaps (physics right, word wrong) summed over pairs.
+    swaps = report.get("close_pair_swap_totals") or {}
+    swap_rows = []
+    for side_label, side_key in (("Graph A", "graph_a"), ("Graph B", "graph_b")):
+        for name, cnt in sorted((swaps.get(side_key) or {}).items(), key=lambda kv: -kv[1]):
+            swap_rows.append(html.Div(
+                f"{side_label}: {name} — {cnt} edge(s)",
+                style={"fontSize": "12px", "padding": "2px 0"},
+            ))
+    if swap_rows:
+        children.extend([
+            html.Div("Close-pair vocabulary swaps (soft-matched only via effect substitution)", className="report-section-label"),
+            html.Div(swap_rows, className="report-section"),
+        ])
+
     children.extend([
         html.Div(f"Per-pair detail ({n_pairs} pairs)", className="report-section-label"),
         html.Div(pair_rows, className="report-section prr-table"),

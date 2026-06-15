@@ -1,0 +1,59 @@
+{
+  "image_filename": "push_63_school_recess.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "An elementary school playground during recess \u2014 dozens of children play across swings, slides, monkey bars, and the grass area, two adults stand at the edge monitoring, and the school building sits in the background with windows open.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. NEGATIVE CONTROL with high entity count and weighted institutional entity (school). Tests over-firing of Institutional Deference. Children running and playing should NOT be classified as `fleeing`. No hazards, no edges.",
+  "nodes": [
+    {
+      "id": "child_1",
+      "label": "child",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "child_2",
+      "label": "child",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "child_3",
+      "label": "child",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "child_4",
+      "label": "child",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "teacher_1",
+      "label": "teacher",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "teacher_2",
+      "label": "teacher",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "school_1",
+      "label": "school",
+      "state": "intact",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": []
+}

@@ -210,8 +210,8 @@ def test_d4_legend_colors_match_stylesheet(main_module):
     expected_node_pairs = {
         "threat": "#dc2626",
         "orphan-threat": "#dc2626",
-        "at-risk-distress": "#ea580c",
-        "at-risk-proximity": "#ca8a04",
+        "at-risk-distress": "#0369a1",
+        "at-risk-proximity": "#7dd3fc",
         "bystander": "#94a3b8",
         "inferred": "#8b5cf6",
         "unresolved": "#737373",
@@ -238,3 +238,32 @@ def test_d4_legend_colors_match_stylesheet(main_module):
         assert expected_hex in legend_src.lower(), (
             f"_graph_legend source does not use {expected_hex} for edge.{cls}"
         )
+
+
+# ---------------------------------------------------------------------------
+# D5 — Synonym states classify as Distress (push_20 episode: clinging person
+# rendered as Proximity because the classifier checked the raw word against
+# the canonical Distress list).
+# ---------------------------------------------------------------------------
+@pytest.mark.blocking
+def test_d5_synonym_state_classifies_as_distress(main_module):
+    graph = {
+        "nodes": [
+            {"id": "water_1", "label": "water", "state": "engulfing", "hazardous": True, "inferred": False},
+            {"id": "person_1", "label": "person", "state": "clinging", "hazardous": False, "inferred": False},
+            {"id": "person_2", "label": "person", "state": "crouching", "hazardous": False, "inferred": False},
+            {"id": "person_3", "label": "person", "state": "stationary", "hazardous": False, "inferred": False},
+        ],
+        "edges": [
+            {"source": "water_1", "target": "person_1", "effect": "may_harm", "via_state": "engulfing"},
+            {"source": "water_1", "target": "person_3", "effect": "isolates", "via_state": "engulfing"},
+        ],
+    }
+    elements = main_module.graph_to_cytoscape_elements(graph)
+    classes = {e["data"]["id"]: e.get("classes") for e in elements if "source" not in e.get("data", {})}
+    assert classes["person_1"] == "at-risk-distress", "clinging (synonym of fleeing) must render as Distress"
+    assert classes["person_2"] == "at-risk-distress", "crouching (synonym of fleeing) must render as Distress"
+    assert classes["person_3"] == "at-risk-proximity", "stationary with incoming edge stays Proximity"
+    # And the label must keep the raw annotator word, not the canonical.
+    labels = {e["data"]["id"]: e["data"]["label"] for e in elements if "source" not in e.get("data", {})}
+    assert "clinging" in labels["person_1"]

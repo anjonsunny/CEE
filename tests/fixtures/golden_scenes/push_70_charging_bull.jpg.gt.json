@@ -1,0 +1,84 @@
+{
+  "image_filename": "push_70_charging_bull.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "At a rural festival, a large brown bull has escaped its pen \u2014 broken wooden fencing visible in the background \u2014 and is mid-charge across an open dirt area with head lowered and dust kicking up; three people are running away in the foreground, while festival booths and a crowd of bystanders are visible further back, most unaware of the situation.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. CHARGING STATE TEST \u2014 animal threat in active motion. Bull is `charging` (not `rabid` \u2014 bull is escaped not sick). Schema fix: bystander_1/person re-id'd to person_4/person_5. Distance rule: bull is actively charging at the three foreground fleeing people; distant bystanders are well behind it and not in its immediate path \u2014 direct bull->bystander edges dropped. Restored state synonyms: person_1, person_2, person_3 fleeing->running_away (all three visibly sprinting away from the charging bull in the foreground). C13 fix: added worsens self-loop(s) to standing hazard(s) without external targets (fence_1).",
+  "nodes": [
+    {
+      "id": "bull_1",
+      "label": "bull",
+      "state": "charging",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "fence_1",
+      "label": "fence",
+      "state": "fallen",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "person_1",
+      "label": "person",
+      "state": "running_away",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "person_2",
+      "label": "person",
+      "state": "running_away",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "person_3",
+      "label": "person",
+      "state": "running_away",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "person_4",
+      "label": "person",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "person_5",
+      "label": "person",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "bull_1",
+      "target": "person_1",
+      "effect": "may_harm",
+      "via_state": "charging"
+    },
+    {
+      "source": "bull_1",
+      "target": "person_2",
+      "effect": "may_harm",
+      "via_state": "charging"
+    },
+    {
+      "source": "bull_1",
+      "target": "person_3",
+      "effect": "may_harm",
+      "via_state": "charging"
+    },
+    {
+      "source": "fence_1",
+      "target": "fence_1",
+      "effect": "worsens",
+      "via_state": "fallen"
+    }
+  ]
+}

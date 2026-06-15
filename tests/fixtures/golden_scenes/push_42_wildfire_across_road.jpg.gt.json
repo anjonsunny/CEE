@@ -1,0 +1,70 @@
+{
+  "image_filename": "push_42_wildfire_across_road.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "Aerial view of a two-lane rural road with wildfire burning actively across it \u2014 flames on both sides and embers crossing \u2014 and a cluster of three houses sit on the far side of the fire on a slight rise.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image vs prompt: prompt described figures in the yards of far-side houses; not identifiable at this altitude \u2014 dropped person_1/person_2. Distance rule preserved: fire spreads to far-side houses by ember/contiguity, blocks_access_to road; no direct fire->people edges drawn anyway since people are inside houses or on far side.",
+  "nodes": [
+    {
+      "id": "fire_1",
+      "label": "fire",
+      "state": "spreading",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "road_1",
+      "label": "road",
+      "state": "intact",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "house_1",
+      "label": "house",
+      "state": "intact",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "house_2",
+      "label": "house",
+      "state": "intact",
+      "hazardous": false,
+      "inferred": false
+    },
+    {
+      "id": "house_3",
+      "label": "house",
+      "state": "intact",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "fire_1",
+      "target": "road_1",
+      "effect": "blocks_access_to",
+      "via_state": "spreading"
+    },
+    {
+      "source": "fire_1",
+      "target": "house_1",
+      "effect": "may_spread_to",
+      "via_state": "spreading"
+    },
+    {
+      "source": "fire_1",
+      "target": "house_2",
+      "effect": "may_spread_to",
+      "via_state": "spreading"
+    },
+    {
+      "source": "fire_1",
+      "target": "house_3",
+      "effect": "may_spread_to",
+      "via_state": "spreading"
+    }
+  ]
+}

@@ -23,7 +23,10 @@ target IS right now. So to label correctly, the model must actually look at
 each target. A lazy model that learned "water + house = harm" from thousands
 of flood photos will write `may_harm` everywhere and get caught.
 
-**The rule.** Fluid edge effect selection, keyed to the target.
+**The rule.** Fluid edge effect selection, keyed to the target. Later
+generalized beyond fluids (the push_18 flying sign): may_harm NEVER points
+at an already-hazardous target, whatever the source. Hitting a collapsing
+house does not first-harm it; it makes an existing problem worse.
 
 **Where it lives.** Both prompts (fluid edge effect selection paragraph).
 Test C27 checks our GT files. The runtime conformance checker (M7,
@@ -168,7 +171,20 @@ The edge says the channel, the state says the tense. Adding a second place
 to store the same fact just creates two places that can disagree.
 
 **The rule.** may_harm's definition covers ongoing harm; read the tense from
-the target's state.
+the target's state. Mental reframe: the "may" marks capability of the
+channel ("CAN harm"), not probability; whether it currently IS harming is
+the state's job.
+
+**Deferred decision (2026-06-11):** Sunny tripped on the tense reading twice
+(push_12, push_20), which is a signal the model may too. A rename to a
+tense-neutral verb (harms) was considered and deferred: it would churn every
+GT file, force re-freezing all goldens, and break comparability with the
+June baseline metrics, all mid-verification. Revisit at the Stage 1 to
+Stage 2 boundary, which is a planned schema version break anyway. Evidence
+to gather first: during Stage 1 analysis, count how often the model misuses
+may_harm on ongoing-harm scenes (the push_12 / push_20 class). If it trips
+where the careful human tripped, that argues for the rename AND is itself a
+reportable finding about tense reasoning in VLMs.
 
 **Where it lives.** Both prompts (may_harm bullet). Test B12.
 
@@ -221,6 +237,130 @@ evaluation would ever catch it.
 two: the Stage 1 intervention pipeline (not built).
 
 ---
+
+## 12. Counting houses is causal reasoning in disguise
+
+**The story.** An aerial photo shows forty flooded houses. The rule says:
+model a handful of representatives, not all forty. That sounds like
+formatting advice. It is not. To compress forty houses into three, the
+model must first judge that they are all the SAME situation: water
+surrounds each, water escalates each, nothing else. And to know when NOT
+to compress, it must spot the exception: the one house among forty that is
+collapsing, not just flooded. That one earns its own node.
+
+Grouping by causal sameness, and noticing the one that differs, IS causal
+reasoning. A model that lists fifteen identical clones failed to see the
+sameness. A model that buries the collapsing house in the crowd failed to
+see the difference. Both are reasoning failures wearing a formatting
+costume.
+
+Half of this is checkable by machine, with no answer key: clone-counting.
+If a graph has six nodes with the same label, same state, and same edges,
+the checker flags it (redundant_instancing). The other half, missing the
+one different house, needs eyes: the image or the GT comparison.
+
+One exception, found during push_36 (twelve flooded cars, figures signaling
+on the roofs): people are COUNTED, not summarized. "About four cars" and
+"exactly four cars" lead to the same response; "three people stranded" and
+"five people stranded" do not — boats and rescue trips depend on the count.
+So every distinguishable person gets a node, and only an uncountable crowd
+gets representatives plus a stated estimate.
+
+The threshold (settled at push_39, three rescuer clusters of "4-6 each"):
+count individually when the exact number is readable AND total people nodes
+stay at six or fewer; otherwise one representative per causal situation with
+the count in prose. Six is what fits beside a typical scene's hazards within
+the node budget, and beyond six, rescue planning itself thinks in groups and
+counts. Either way the number is never lost — it just moves from the node
+list into the words.
+
+**The rules.** Representative instancing (~10 nodes), with the people
+exception. Checker rules redundant_instancing (people exempt) and
+node_budget_exceeded.
+
+**Where it lives.** Both prompts. Tests B10, O13, O14, O15.
+
+---
+
+## 13. The car is never the victim
+
+**The story.** Training captions say "cars trapped in floodwater" all the
+time. But a car cannot be a victim. Trace the harm: the water is the source,
+the car is a waypoint (it receives harm, turns into a flooded wreck, and
+passes danger onward), and the driver inside is the terminal: the harm
+stops with him. "Who is the victim?" really asks "where does the causal
+chain END?"
+
+So the rule: distress states (trapped, drowning, stranded) belong to living
+beings only. A vehicle or structure is intact, a converted hazard (crushed,
+flooded), or at-risk by Proximity. The person inside is a separate node
+with their own state. One physical object, two nodes, opposite
+trajectories: the car can only worsen toward hazard-hood, the person can
+only suffer toward distress.
+
+The counterfactual check that shows the roles are real: take the driver out
+of the car. Same physical trouble, urgency gone. A model that mourns the
+empty car like the occupied one has not understood what the danger was for.
+This also encodes the responder's objective function (life first, property
+second) into the graph structure itself.
+
+**The rule.** Living beings only (at-risk vocabulary section).
+
+**Where it lives.** Both prompts. Tests C28, O17. Checker rule
+distress_state_on_non_living. Born from Sunny's push_34 question.
+
+---
+
+## 14. Three words for people in trouble
+
+**The story.** A man stranded on a car roof in floodwater used to
+canonicalize to "fleeing". Sunny caught the absurdity: stranded means you
+CANNOT move; fleeing means you ARE moving, fast. Near-opposites were sharing
+one word because the vocabulary only had one non-medical distress state, and
+everything got stuffed into it.
+
+So the one overloaded family became three, each implying a different rescue:
+
+- `fleeing`: in active flight (escaping, running_away). Rescue: clear the
+  path, guide them.
+- `trapped`: cannot move; circumstance holds them (stuck, stranded, clinging,
+  struggling). Rescue: extraction — boat, ladder, dig.
+- `cowering`: could move, but a direct threat pins them in place (crouching,
+  ducking, hiding, surrendering). Rescue: neutralize the threat first.
+
+The split also fixed a fairness trap of our own making: the model can only
+pick from the canonical list, so for stranded people its least-wrong option
+was literally "fleeing". We were forcing the mislabel, then ready to grade
+it. And because GT files store the annotator's raw word (stranded, crouching)
+while only the mapping underneath changed, not one GT file needed editing.
+
+**The rule.** Three at-risk behavioral families (at-risk vocabulary section).
+
+**Where it lives.** Both prompts. AT_RISK_STATES + STATE_SYNONYMS in main.py.
+Tests A3, E12. Born from Sunny's push_36 objection.
+
+---
+
+## The reasoning map: which rule forces which act of looking
+
+Every rule in the prompts quietly demands one act of reasoning. This table
+is the index. Column three says which machine check catches a failure, and
+"eyes" means only the image or GT comparison can catch it.
+
+| Rule | The reasoning it forces | Caught by |
+|---|---|---|
+| Fluid effect triad | Check what each target IS (victim? hazard? still safe?) | checker: fluid_may_harm_hazardous_target, fluid_wrong_effect_for_person |
+| Distance thresholds | Check where each person STANDS relative to each hazard | eyes (C12-class) |
+| Position, not role | Ignore uniforms; judge geometry | eyes; uniform-responder flag C25 hints |
+| Mutual-hazard rule | Judge whether two hazards feed EACH OTHER or share one cause | checker: spread_between_hazards, one_way_worsens |
+| Fluid provenance | Notice what produces what (fire makes the smoke) | checker: smoke_superset_violation; C22 on GTs |
+| Independent harm channels | Keep heat and smoke as separate dangers with separate reach | checker: smoke_superset_violation, partially |
+| Obstruction coupling | Ask: does this blockage actually matter to anyone in danger? | checker: uncoupled_obstruction; direction needs eyes |
+| Occupancy rubric | Weigh evidence before inventing a person | eyes (count inferred nodes vs cues) |
+| Representative instancing | Group by causal sameness; spot the exception | checker: redundant_instancing (over); eyes (under) |
+| collapsing vs collapsed | Read motion evidence from a still image | eyes |
+| may_harm tense | Read harm-in-progress from the target's state | checker: structural consistency of state + edge |
+| Living beings only | Trace the harm chain to its terminal: who absorbs vs what transmits | checker: distress_state_on_non_living |
 
 ## The big picture: what all these rules are for
 

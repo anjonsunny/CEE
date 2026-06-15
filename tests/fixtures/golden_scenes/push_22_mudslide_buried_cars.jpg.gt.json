@@ -1,0 +1,83 @@
+{
+  "image_filename": "push_22_mudslide_buried_cars.jpg",
+  "schema_version": "2026-06-10",
+  "caption": "A wet brown mudslide has covered a section of rural mountainside road and partially buried three cars on the shoulder, with broken trees in the flow and mud still creeping forward across the asphalt; a man in a yellow rain jacket stands on the intact road just past the mud's leading edge.",
+  "source": "claude-code (in-terminal generation)",
+  "annotator_notes": "Image matches prompt. `seeping` is closest vocab match for the advancing mud flow (mud not explicitly in closed vocabulary). Cars partially buried under mud weight and debris \u2014 modeled as crushed. Tree fallen with the flow, embedded in the mud (no specific target, self-loop). Man on dry road but only a short distance from the leading edge \u2014 mud may_spread_to him; he is at-risk Proximity. blocks_access_to the road also makes sense \u2014 mud cuts off the road. EFFECT RELABEL (fluid -> already-hazardous target): mud_1->car_1, mud_1->car_2, mud_1->car_3 changed may_harm -> increases_risk_to per may_harm truth condition.",
+  "nodes": [
+    {
+      "id": "mud_1",
+      "label": "mud",
+      "state": "seeping",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "car_1",
+      "label": "car",
+      "state": "crushed",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "car_2",
+      "label": "car",
+      "state": "crushed",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "car_3",
+      "label": "car",
+      "state": "crushed",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "tree_1",
+      "label": "tree",
+      "state": "fallen",
+      "hazardous": true,
+      "inferred": false
+    },
+    {
+      "id": "man_1",
+      "label": "man",
+      "state": "stationary",
+      "hazardous": false,
+      "inferred": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "mud_1",
+      "target": "car_1",
+      "effect": "increases_risk_to",
+      "via_state": "seeping"
+    },
+    {
+      "source": "mud_1",
+      "target": "car_2",
+      "effect": "increases_risk_to",
+      "via_state": "seeping"
+    },
+    {
+      "source": "mud_1",
+      "target": "car_3",
+      "effect": "increases_risk_to",
+      "via_state": "seeping"
+    },
+    {
+      "source": "mud_1",
+      "target": "man_1",
+      "effect": "may_spread_to",
+      "via_state": "seeping"
+    },
+    {
+      "source": "tree_1",
+      "target": "tree_1",
+      "effect": "worsens",
+      "via_state": "fallen"
+    }
+  ]
+}
