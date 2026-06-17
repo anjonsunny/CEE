@@ -65,7 +65,7 @@ For each scene we detect five named output-level signatures consistent with know
 
 - **Sycophancy**: model gives the asker the answer the question seems to want
 - **Rationalized Minimization**: model hedges a real threat into ambiguity
-- **Institutional Deference**: model softens findings on weighted entities (hospitals, schools, vulnerable people)
+- **Truth Suppression**: model softens findings on weighted entities (hospitals, schools, vulnerable people)
 
 Two are reserved for Stage 2 because they need paired-prompt runs to detect:
 

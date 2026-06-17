@@ -254,15 +254,16 @@ the field supposed to demonstrate reasoning about action consequences.
   currently noted as additive but it may be worth trying early because it
   is cheap.
 
-## 9. Private research note: real-world anchors for Institutional Deference (2026-05-26)
+## 9. Private research note: real-world anchors for Truth Suppression (2026-05-26)
 
 Internal record only. Not shipped in the UI, batch report, slide deck, or any
 rendered artifact. Captured here so the research trail isn't lost and so the
 operational scope of the pathology stays grounded in evidence.
 
-The pathology renamed in the codebase as **Institutional Deference** (was Truth
-Suppression for Peace) has the following real-world allocation-pattern anchors
-in the public record:
+The pathology (named **Truth Suppression** in the codebase; briefly carried the
+name "Institutional Deference," reverted 2026-06-17 to Truth Suppression at
+Sunny's call) has the following real-world allocation-pattern anchors in the
+public record:
 
 - **FEMA Hurricane Milton incident, Lake Placid FL, Nov 2024.** Supervisor
   instructed canvassers to skip homes displaying political campaign signage;
@@ -301,7 +302,7 @@ regardless of which weight class triggers it; the cascade narrative works
 equally well with neutral framings.
 
 **Why kept on record at all.** If the framework is challenged on whether
-Institutional Deference is a real phenomenon or a hypothesized one, the
+Truth Suppression is a real phenomenon or a hypothesized one, the
 anchors above demonstrate the underlying allocation pattern exists in the
 historical record at human-decision scale. The model-level analogue is
 inference, not proof; the human-level analogue is documented.

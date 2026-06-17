@@ -11,7 +11,7 @@ Modern Vision Language Models (VLMs) produce confident structured output (threat
 
 ## What is already built (Stage 1, pre-intervention)
 
-Given a disaster image and caption, the pipeline produces a structured JSON with detected objects, threats, recommendations, two causal graphs (Graph A from recommendations, Graph B independently extracted), an internal alignment score with about 30 contract checks, a Trust score with Low / Moderate / High bands, and per-scene pathology footprints (Sycophancy, Rationalized Minimization, Institutional Deference; two more deferred to Stage 2). A batch report rolls these up across runs. Run it via `python main.py` (Dash UI) or `python run_pipeline.py --image PATH` (headless).
+Given a disaster image and caption, the pipeline produces a structured JSON with detected objects, threats, recommendations, two causal graphs (Graph A from recommendations, Graph B independently extracted), an internal alignment score with about 30 contract checks, a Trust score with Low / Moderate / High bands, and per-scene pathology footprints (Sycophancy, Rationalized Minimization, Truth Suppression; two more deferred to Stage 2). A batch report rolls these up across runs. Run it via `python main.py` (Dash UI) or `python run_pipeline.py --image PATH` (headless).
 
 ## Your project: the intervention step
 

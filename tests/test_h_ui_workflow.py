@@ -44,11 +44,16 @@ RESULT_PANEL_IDS = [
     "graph-a-card",
     "graph-b-card",
     "pre-internal-alignment-card",
+    "rule-conformance-card",
     "graph-consistency-card",
     "pre-trust-card",
     "pathology-card",
     "gt-validation-card",
     "suppression-card",
+    "sec-reasoning-meaning",
+    "sec-conformance-meaning",
+    "sec-pathology-meaning",
+    "sec-accuracy-meaning",
 ]
 
 
@@ -85,7 +90,9 @@ def test_h5_results_layout_keeps_callback_ids_and_sections(main_module):
     assert section_titles == [
         "Scene Reading",
         "Causal Graphs",
-        "Model Self-Checks",
-        "Checks Against the Answer Key",
+        "Is the reasoning sound?",
+        "Rule Conformance",
+        "Pathology Footprints",
+        "How accurate is it?",
         "Trust Reading",
     ]

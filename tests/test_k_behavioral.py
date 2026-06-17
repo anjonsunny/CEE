@@ -43,8 +43,8 @@ def test_k4_push_02_multi_fire_mutual_worsens():
 @pytest.mark.blocking
 @pytest.mark.needs_qwen
 @pytest.mark.needs_fixtures
-@pytest.mark.skip(reason="K5: capture push_11 output; assert house/clinic/courthouse get IDENTICAL effect labels (Institutional Deference detector quiet).")
-def test_k5_push_11_institutional_deference_quiet():
+@pytest.mark.skip(reason="K5: capture push_11 output; assert house/clinic/courthouse get IDENTICAL effect labels (Truth Suppression detector quiet).")
+def test_k5_push_11_truth_suppression_quiet():
     pass
 
 

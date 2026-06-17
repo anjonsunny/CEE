@@ -29,7 +29,7 @@ Capture protocol:
 ## `pathology_cases/` (planned)
 
 Positive and negative examples per pathology detector (Sycophancy,
-Rationalized Minimization, Institutional Deference, Tribal Mirroring,
+Rationalized Minimization, Truth Suppression, Tribal Mirroring,
 Safety Theater). Used by K7. Not yet populated.
 
 ## `intervention_pairs/` (planned)

@@ -341,6 +341,52 @@ Tests A3, E12. Born from Sunny's push_36 objection.
 
 ---
 
+## 15. Numbers don't mean anything until you group the mistakes
+
+**The story.** A result screen says "5 conformance violations." That number
+is noise. Five of WHAT? A reader cannot act on a count. But if you sort those
+five into "three of them are the model misreading what an entity is, two are
+it misreading who is in danger," now the screen says something: it tells you
+HOW the model failed to think, not just that it failed. The Meaning Generator
+turns raw rule-breaks into that one sentence.
+
+**The rule.** Every conformance rule is assigned to exactly one of five
+**cognitive failure families**. A family is a kind of blindness, plus an
+authored meaning (what shortcoming the breaks reveal) and an authored decision
+impact (what it costs an operator). The families:
+
+| Family (plain label) | Rules in it | The shortcoming it reveals |
+|---|---|---|
+| **Misreads what an entity is** (`state_blind`) | may_harm_hazardous_target, distress_state_on_non_living, fluid_wrong_effect_for_person, hazardous_and_at_risk | Picks effects/states by surface association instead of checking what each entity currently is. Mislabels already-damaged things as freshly threatened, confuses victims with objects: misdirects triage. |
+| **Misreads who is in danger** (`reach_blind`) | smoke_superset_violation, uncoupled_obstruction | Flags by presence, not geometry: never reasons about who is actually in a hazard's reach. Misses people downwind, raises false-alarm edges: alert fatigue. |
+| **Misreads how entities connect** (`structure_blind`) | one_way_worsens, spread_between_hazards | Cannot track direction or mutual feeding between hazards: treats co-located hazards as one blob. Can't tell which intervention helps: recommends the wrong suppression. |
+| **Cannot summarize** (`compression_blind`) | redundant_instancing, node_budget_exceeded | Lists what it sees instead of grouping by causal sameness. Floods the operator on large scenes, can't summarize a mass-casualty field. |
+| **Hallucination / garbled structure** (`hallucination`) | effect_not_in_vocabulary, unresolved_endpoint, via_state_mismatch, via_state_not_hazard_bearing, edge_from_non_hazardous, self_loop_not_worsens, redundant_self_loop, hazard_flag_state_mismatch, hazardous_node_no_edges | Structurally invalid output: edges to entities that don't exist, invented vocabulary, self-inconsistent fields. Signatures of fabrication: the graph can't be taken at face value. |
+
+The meaning is **authored into the family, not computed by a model.** This is
+deliberate and it is the same methodological stance as the rest of CEE+: an
+LLM interpreting our own measurements would reintroduce the exact rung-1
+ungrounded-fluency problem we are studying. The interpretation has to be
+engineered into the rule design so it is auditable. Deterministic in, same
+sentence out, every time.
+
+The same family idea drives two more surfaces: the conformance panel
+**color-codes** each violation by its family color (red for hallucination or
+multi-break families, amber otherwise), and the section header shows a
+takeaway sentence plus family pills with hover popups. Pathology footprints
+get the parallel treatment (cascade pills with arrows). The shared goal:
+findings communicated fast, with WHY and SO-WHAT attached, never a bare count.
+
+**Where it lives.** `FAILURE_FAMILIES` and the `RULE_TO_FAMILY` inverse map in
+main.py; `generate_conformance_meaning` builds the takeaway; the colored panel
+is `make_rule_conformance_panel`. Test Q1 enforces that every conformance rule
+actually used in the code sits in exactly one family (total coverage, no
+overlap), so a new rule cannot be added without giving it a meaning. The rest
+of the Q-series tests the generator logic; the R-series (data-contract) tests
+it against real captured run output so field-name drift can't slip through.
+
+---
+
 ## The reasoning map: which rule forces which act of looking
 
 Every rule in the prompts quietly demands one act of reasoning. This table

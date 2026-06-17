@@ -1,0 +1,10 @@
+# Derived from qwen2.5vl:7b with a 16k context window.
+# The base model's default context (~4096) overflows when CEE+'s full schema
+# prompt (~7,300 tokens) is sent alongside an image, crashing the Ollama
+# runner with a 500. Baking num_ctx into a derived model fixes it without any
+# code or endpoint change, and survives Ollama restarts.
+#
+# Build once:  ollama create qwen2.5vl-16k -f ollama/Modelfile.qwen2.5vl-16k
+FROM qwen2.5vl:7b
+PARAMETER num_ctx 16384
+PARAMETER temperature 0
