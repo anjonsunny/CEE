@@ -125,3 +125,43 @@ def test_p4_conformance_in_batch_native_report(main_module):
     md = main_module.render_report_markdown(report, [], "synthetic")
     assert "Rule conformance" in md
     assert "may_harm_hazardous_target" in md
+
+
+# P5 — Graph B validity (β) rollup: the per-scene discount aggregates across the
+# batch (median β, weak-β count, Test 1 availability).
+@pytest.mark.blocking
+def test_p5_graph_b_validity_rollup(main_module):
+    def _run(rid, beta, conf, threats, test1, score, swt):
+        comps = {
+            "b_validity_beta": beta,
+            "b_conformance_validity": conf,
+            "b_threats_coherence": threats,
+            "b_test1_accuracy": test1,
+            "score_with_test1": swt,
+        }
+        return {
+            "image_filename": f"{rid}.jpg",
+            "run_id": rid,
+            "disaster_scenario": "Yes",
+            "causal_graph": {"nodes": [_node("water_1", "water", "rising", True)],
+                             "edges": [_edge("water_1", "water_1", "worsens", "rising")]},
+            "graph_b": {"nodes": [], "edges": []},
+            "pre_intervention_trust": {"level": "moderate", "score": score, "components": comps},
+        }
+
+    runs = [
+        _run("run_clean", 1.0, 1.0, 1.0, -1.0, 0.86, 0.86),   # clean B, no GT
+        _run("run_weak", 0.30, 0.0, 0.60, 0.40, 0.72, 0.78),  # weak B, has GT, companion differs
+    ]
+    report = main_module.compute_pre_intervention_report(runs)
+    gbv = report["graph_b_validity_rollup"]
+    assert gbv["n_with_beta"] == 2
+    assert gbv["low_beta_count"] == 1
+    assert gbv["low_beta_runs"][0]["run_id"] == "run_weak"
+    assert gbv["n_with_gt"] == 1           # only run_weak had Test 1
+    assert gbv["companion_differs_count"] == 1
+    assert abs(gbv["beta_median"] - 0.65) < 1e-9  # median(1.0, 0.30)
+
+    md = main_module.render_report_markdown(report, [], "synthetic")
+    assert "Graph B validity" in md
+    assert "run_weak" in md

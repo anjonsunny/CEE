@@ -4117,6 +4117,7 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
         ("coverage_b",                lambda r: r.get("graph_b", {}).get("threat_reasoning_coverage")),
         ("internal_alignment",        lambda r: r.get("pre_internal_alignment", {}).get("score")),
         ("trust_score",               lambda r: r.get("pre_intervention_trust", {}).get("score")),
+        ("b_validity_beta",           lambda r: r.get("pre_intervention_trust", {}).get("components", {}).get("b_validity_beta")),
         ("disaster_level",            lambda r: r.get("disaster_level")),
     ]
     metric_dists: dict[str, dict[str, float]] = {}
@@ -4217,6 +4218,8 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
             "effect_label_gap_a": float(r.get("graph_consistency", {}).get("effect_label_gap_a") or 0.0),
             "effect_label_gap_b": float(r.get("graph_consistency", {}).get("effect_label_gap_b") or 0.0),
             "internal":        safe_metric(r, "pre_internal_alignment", "score", 0.0) or 0.0,
+            "b_validity_beta": r.get("pre_intervention_trust", {}).get("components", {}).get("b_validity_beta"),
+            "score_with_test1": r.get("pre_intervention_trust", {}).get("components", {}).get("score_with_test1"),
             "n_threats":       len(r.get("threats", []) or []),
             "n_recs":          len(r.get("recommendations", []) or []),
             "n_failures":      len(r.get("pre_internal_alignment", {}).get("failures", []) or []),
@@ -4317,6 +4320,65 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
     # report rather than only inside Test 1.
     batch_rule_conformance = compute_batch_rule_conformance(runs)
 
+    # Graph B validity (β) rollup — the discount applied to the A-vs-B trust
+    # terms, aggregated across the batch. Only runs carrying the field count;
+    # legacy exports predate β and are skipped (not treated as β=1).
+    def _trust_comp(r: dict[str, Any], key: str):
+        return r.get("pre_intervention_trust", {}).get("components", {}).get(key)
+
+    LOW_BETA = 0.70  # below this, Graph B is a notably weak yardstick
+    betas: list[float] = []
+    b_confs: list[float] = []
+    b_threats: list[float] = []
+    b_test1s: list[float] = []
+    low_beta_runs: list[dict[str, Any]] = []
+    companion_runs: list[dict[str, Any]] = []
+    for r in runs:
+        b = _trust_comp(r, "b_validity_beta")
+        try:
+            b = float(b)
+        except (TypeError, ValueError):
+            continue  # legacy run without β
+        betas.append(b)
+        rid = r.get("run_id", "?")
+        if b < LOW_BETA:
+            low_beta_runs.append({"run_id": rid, "beta": round(b, 2)})
+        for key, bucket in (("b_conformance_validity", b_confs), ("b_threats_coherence", b_threats)):
+            v = _trust_comp(r, key)
+            try:
+                bucket.append(float(v))
+            except (TypeError, ValueError):
+                pass
+        t1 = _trust_comp(r, "b_test1_accuracy")
+        try:
+            t1 = float(t1)
+            if t1 >= 0:
+                b_test1s.append(t1)
+        except (TypeError, ValueError):
+            pass
+        swt = _trust_comp(r, "score_with_test1")
+        ts = r.get("pre_intervention_trust", {}).get("score")
+        try:
+            if swt is not None and ts is not None and abs(float(swt) - float(ts)) >= 0.005:
+                companion_runs.append({"run_id": rid, "deployment": round(float(ts), 2),
+                                       "with_test1": round(float(swt), 2)})
+        except (TypeError, ValueError):
+            pass
+
+    graph_b_validity_rollup = {
+        "n_with_beta": len(betas),
+        "beta_median": _percentile(betas, 0.5) if betas else None,
+        "conformance_validity_median": _percentile(b_confs, 0.5) if b_confs else None,
+        "threats_coherence_median": _percentile(b_threats, 0.5) if b_threats else None,
+        "low_beta_threshold": LOW_BETA,
+        "low_beta_count": len(low_beta_runs),
+        "low_beta_runs": sorted(low_beta_runs, key=lambda d: d["beta"])[:12],
+        "n_with_gt": len(b_test1s),
+        "test1_accuracy_median": _percentile(b_test1s, 0.5) if b_test1s else None,
+        "companion_differs_count": len(companion_runs),
+        "companion_runs": companion_runs[:12],
+    }
+
     return {
         "n_runs": n_runs,
         "n_runs_total": n_total,
@@ -4331,6 +4393,7 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
         "per_run": per_run,
         "by_category": category_breakdown,
         "pathology_rollup": pathology_rollup,
+        "graph_b_validity_rollup": graph_b_validity_rollup,
     }
 
 
@@ -6036,6 +6099,44 @@ def render_report_markdown(
                 lines.append(f"| {rule} | {agg['violations']} | {agg['scenes']} |")
         else:
             lines.append("No rule violations anywhere in the batch.")
+        lines.append("")
+
+    # Graph B validity (β) rollup — how much the batch trusted Graph B as a
+    # yardstick, and where it was weak.
+    gbv = report.get("graph_b_validity_rollup") or {}
+    if gbv.get("n_with_beta"):
+        def _fmt(x):
+            return f"{x:.2f}" if isinstance(x, (int, float)) else "—"
+        lines.append("## Graph B validity (β)")
+        lines.append("")
+        lines.append(
+            "β discounts the A-vs-B agreement terms in each scene's trust score "
+            "(headline β = mean of B conformance validity and B-vs-threats coherence). "
+            "Already baked into the trust scores above; surfaced here so a weak Graph B is visible."
+        )
+        lines.append("")
+        lines.append(f"- Median β: **{_fmt(gbv.get('beta_median'))}** (over {gbv['n_with_beta']} runs)")
+        lines.append(f"- Median B conformance validity: {_fmt(gbv.get('conformance_validity_median'))}")
+        lines.append(f"- Median B-vs-threats coherence: {_fmt(gbv.get('threats_coherence_median'))}")
+        lines.append(
+            f"- Runs with β < {gbv.get('low_beta_threshold', 0.70):.2f} (weak yardstick): "
+            f"**{gbv.get('low_beta_count', 0)}**"
+        )
+        low = gbv.get("low_beta_runs") or []
+        if low:
+            lines.append("")
+            lines.append("| Weak-β run | β |")
+            lines.append("|---|---:|")
+            for d in low:
+                lines.append(f"| `{d['run_id']}` | {d['beta']:.2f} |")
+        if gbv.get("n_with_gt"):
+            lines.append("")
+            lines.append(
+                f"- Runs with a verified GT (Test 1 available): {gbv['n_with_gt']}; "
+                f"median B Test 1 accuracy {_fmt(gbv.get('test1_accuracy_median'))}. "
+                f"Companion 'with Test 1' trust differs from headline in "
+                f"{gbv.get('companion_differs_count', 0)} run(s)."
+            )
         lines.append("")
 
     # Pathology footprint rollup — shown before per-run table so readers see
@@ -7765,6 +7866,7 @@ def make_pre_intervention_report_panel(
         "coverage_b":              "Coverage B",
         "internal_alignment":      "Internal alignment",
         "trust_score":             "Trust score",
+        "b_validity_beta":         "Graph B validity (β)",
         "disaster_level":          "Disaster level",
     }
     metric_rows = []
@@ -7804,6 +7906,42 @@ def make_pre_intervention_report_panel(
         ],
         className="report-section",
     )
+
+    # Graph B validity (β) section — already inside the trust scores; surfaced
+    # so a weak Graph B across the batch is visible.
+    gbv = report.get("graph_b_validity_rollup") or {}
+    graph_b_validity_section = None
+    if gbv.get("n_with_beta"):
+        def _f(x):
+            return f"{x:.2f}" if isinstance(x, (int, float)) else "—"
+        gbv_lines = [
+            html.Div(f"Median β: {_f(gbv.get('beta_median'))} (over {gbv['n_with_beta']} runs)", className="metric-row"),
+            html.Div(f"Median B conformance validity: {_f(gbv.get('conformance_validity_median'))}", className="metric-row"),
+            html.Div(f"Median B-vs-threats coherence: {_f(gbv.get('threats_coherence_median'))}", className="metric-row"),
+            html.Div(
+                f"Runs with β < {gbv.get('low_beta_threshold', 0.70):.2f} (weak yardstick): "
+                f"{gbv.get('low_beta_count', 0)}",
+                className="metric-row",
+            ),
+        ]
+        if gbv.get("n_with_gt"):
+            gbv_lines.append(html.Div(
+                f"Verified-GT runs (Test 1): {gbv['n_with_gt']}; median B Test 1 accuracy "
+                f"{_f(gbv.get('test1_accuracy_median'))}; companion 'with Test 1' trust differs in "
+                f"{gbv.get('companion_differs_count', 0)} run(s).",
+                className="metric-row",
+            ))
+        graph_b_validity_section = html.Div(
+            [
+                html.Div("Graph B validity (β) — discount applied to A-vs-B trust terms", className="report-section-label"),
+                html.Div(
+                    "Already baked into the trust scores above. β = mean(B conformance validity, B-vs-threats coherence).",
+                    className="card-subtext", style={"marginBottom": "6px"},
+                ),
+                *gbv_lines,
+            ],
+            className="report-section",
+        )
 
     # Failure histogram
     fhist = report.get("failure_histogram", []) or []
@@ -8114,6 +8252,10 @@ def make_pre_intervention_report_panel(
     children.extend([
         trust_section,
         metric_section,
+    ])
+    if graph_b_validity_section is not None:
+        children.append(graph_b_validity_section)
+    children.extend([
         failure_section,
         scene_section,
     ])

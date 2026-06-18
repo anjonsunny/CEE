@@ -138,7 +138,10 @@ column two.
   Test 1 report sums violations per rule across all runs and counts close-pair
   vocabulary swaps per matched pair. The batch worker recomputes gt_validation
   against the real Graph B and passes threats + gt_validation to trust, so batch
-  trust equals single-run trust (guarded by test F9). NOTE: the batch REPORT
-  does not yet surface Graph B validity (β) or the companion 'with Test 1' trust
-  variant; batch trust aggregates the headline (deployment) score only.
+  trust equals single-run trust (guarded by test F9). The batch REPORT now
+  surfaces a Graph B validity (β) rollup — median β, weak-β run count, and
+  Test 1 availability / companion divergence — in both the markdown export and
+  the report panel (P5). Batch trust still aggregates the headline (deployment)
+  score; the companion 'with Test 1' variant is reported as a divergence count,
+  not a separate aggregate.
 - K-series behavioral tests await captured model outputs against goldens.

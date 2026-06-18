@@ -762,6 +762,11 @@ The per-scene instruments get summed across a batch inside compute_ground_truth_
 - **What:** An identical graph compared to itself yields zero swaps; only soft-only matches with a differing close-pair effect count.
 - **Severity:** BLOCKING. **Status:** auto.
 
+### P5 — Graph B validity (β) rollup
+- **What:** compute_pre_intervention_report aggregates per-scene Graph B validity into `graph_b_validity_rollup`: median β (and B conformance validity / threats coherence), count + list of weak-β runs (β < 0.70), count of verified-GT runs with median B Test 1 accuracy, and how many runs' companion 'with Test 1' trust differs from the headline. Surfaced in both the markdown export and the report panel. Legacy runs without β are skipped (not treated as β=1).
+- **Why:** β is already inside each scene's trust score; this makes a systematically weak Graph B visible across the batch instead of hidden in the trust number.
+- **Severity:** BLOCKING. **Status:** auto.
+
 ---
 
 ## Q. Meaning Generator from Failure
