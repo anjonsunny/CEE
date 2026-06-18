@@ -186,6 +186,16 @@ may_harm on ongoing-harm scenes (the push_12 / push_20 class). If it trips
 where the careful human tripped, that argues for the rename AND is itself a
 reportable finding about tense reasoning in VLMs.
 
+**Stage-1 evidence log (model tense errors on ongoing-harm scenes):**
+- push_06 (drowning pool), run_20260618T125106: the model attached NO harm
+  edge from the water to the drowning child at all — it never modeled the pool
+  as a hazard, and emitted a self-referential `person_1 --[threatens|drowning]
+  --> person_1` instead. It even used the victim's at-risk state (`drowning`)
+  as a `via_state`, i.e. treated the ongoing-harm state as if it were the
+  hazard channel. This is a model tripping on the ongoing-harm/tense
+  distinction (the `may` framing did not cue it to bind actualized harm from
+  the engulfing water to the victim). Argues toward the tense-neutral rename.
+
 **Where it lives.** Both prompts (may_harm bullet). Test B12.
 
 ---
