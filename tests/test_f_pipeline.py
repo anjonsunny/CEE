@@ -179,6 +179,51 @@ def test_f8_graph_b_trust_panel(main_module):
     assert "β = 0.50" in blob
     assert "Test 1" in blob  # only shown because b_test1_accuracy >= 0
 
+    # Collapsible detail: the receipts behind each score, color-coded by type.
+    def classes(node):
+        out = []
+        c = getattr(node, "className", None)
+        if isinstance(c, str):
+            out.append(c)
+        ch = getattr(node, "children", None)
+        if isinstance(ch, (list, tuple)):
+            for x in ch:
+                out.extend(classes(x))
+        elif ch is not None and not isinstance(ch, str):
+            out.extend(classes(ch))
+        return out
+
+    detailed = main_module.make_graph_b_trust_panel(
+        trust,
+        rule_conformance={"violations": [
+            {"rule": "may_harm_hazardous_target", "graph": "graph_b", "detail": "house_1 may_harm car_1 (already burning)"},
+            {"rule": "redundant_self_loop", "graph": "graph_a", "detail": "ignore me, graph_a"},
+        ]},
+        graph_b={"nodes": [{"id": "house_1", "state": "burning", "hazardous": True},
+                           {"id": "smoke_1", "state": "billowing", "hazardous": True}]},
+        threats=[{"object_id": "house_1"}],  # smoke_1 hazardous in B but not declared → warn
+        gt_validation={
+            "available": True,
+            "b_edge_diff": {
+                "spurious": [{"source": "house_1", "effect": "may_harm", "via_state": "burning", "target": "car_1"}],
+                "missed": [{"source": "house_2", "effect": "worsens", "via_state": "burning", "target": "house_3"}],
+                "matched": [{"source": "house_1", "effect": "worsens", "via_state": "burning", "target": "house_2"}],
+            },
+        },
+    )
+    dblob = " ".join(text_blobs(detailed))
+    dcls = classes(detailed)
+    # Only the graph_b violation is listed, not the graph_a one.
+    assert "may_harm_hazardous_target" in dblob
+    assert "ignore me" not in dblob
+    # Threats mismatch surfaced (smoke_1 hazardous in B, not a declared threat).
+    assert "smoke_1" in dblob
+    # GT edge mismatches surfaced.
+    assert "spurious" in dblob and "missed" in dblob
+    # Color-coded classes present for all three severities.
+    allcls = " ".join(dcls)
+    assert "gb-detail-bad" in allcls and "gb-detail-warn" in allcls and "gb-detail-ok" in allcls
+
 
 # F9 — single-run and batch trust are consistent: EVERY call to
 # assess_pre_intervention_trust passes both threats= and gt_validation=, so all

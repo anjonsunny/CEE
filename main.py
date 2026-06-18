@@ -6585,6 +6585,15 @@ def derive_gt_validation(
         "b_correctness_soft": float(cmp_b_soft.get("b_coverage_soft", 0.0)),
         "b_precision_topo": float(cmp_b_topo.get("a_fidelity_topo", 0.0)),
         "b_correctness_topo": float(cmp_b_topo.get("b_coverage_topo", 0.0)),
+        # Edge-level B-vs-GT diff (strict identity) for the detail view. With
+        # graph_b as arg1: only_in_a = B edges absent from GT (spurious, hurts
+        # precision); only_in_b = GT edges B missed (hurts recall); in_both =
+        # matched.
+        "b_edge_diff": {
+            "spurious": list(cmp_b.get("edge_diff", {}).get("only_in_a", []) or []),
+            "missed":   list(cmp_b.get("edge_diff", {}).get("only_in_b", []) or []),
+            "matched":  list(cmp_b.get("edge_diff", {}).get("in_both", []) or []),
+        },
     }
 
 
@@ -8526,20 +8535,39 @@ def make_pathology_panel(pathologies: dict[str, Any]) -> html.Div:
     )
 
 
-def make_graph_b_trust_panel(trust: dict[str, Any]) -> html.Div:
+def _gb_hazard_ids(graph_b: dict[str, Any]) -> set[str]:
+    """B's own hazardous node ids (hazardous flag or hazard-bearing state)."""
+    out: set[str] = set()
+    for n in (graph_b or {}).get("nodes", []) or []:
+        state = canonicalize_state(str(n.get("state", "")).strip())
+        if n.get("hazardous") or state in HAZARD_BEARING_STATES:
+            k = str(n.get("id", "")).strip().lower()
+            if k:
+                out.add(k)
+    return out
+
+
+def make_graph_b_trust_panel(
+    trust: dict[str, Any],
+    rule_conformance: dict[str, Any] | None = None,
+    graph_b: dict[str, Any] | None = None,
+    threats: list[dict[str, Any]] | None = None,
+    gt_validation: dict[str, Any] | None = None,
+) -> html.Div:
     """Small standalone panel: how far Graph B can be trusted as a yardstick.
 
     Graph B is the independent VLM graph that the trust score uses to judge
     Graph A. Its own reliability (β) lives here, OUT of the trust card, so the
     trust card stays about Graph A. β scales the A-vs-B agreement terms in the
-    trust score; the inputs to β are shown so a low β is explainable.
+    trust score; the inputs to β are shown, with a collapsible detail listing
+    the actual rule violations, the threats overlap, and the GT mismatches.
     """
     components = (trust or {}).get("components", {}) or {}
     if "b_conformance_validity" not in components:
         return html.Div("Run analysis to estimate Graph B trust.", className="empty-state")
 
     conf = float(components.get("b_conformance_validity", 1.0) or 0.0)
-    threats = float(components.get("b_threats_coherence", 1.0) or 0.0)
+    threats_coh = float(components.get("b_threats_coherence", 1.0) or 0.0)
     test1 = float(components.get("b_test1_accuracy", -1.0))
     beta = float(components.get("b_validity_beta", 1.0) or 0.0)
     beta_verified = float(components.get("b_validity_beta_verified", beta) or 0.0)
@@ -8560,18 +8588,84 @@ def make_graph_b_trust_panel(trust: dict[str, Any]) -> html.Div:
     metrics = [
         metric("Conformance validity", conf,
                "Share of B's edges with no rule violation. 0 = every edge breaks a rule."),
-        metric("Vs declared threats", threats,
+        metric("Vs declared threats", threats_coh,
                "Overlap of B's own hazards with the threats block."),
     ]
     if test1 >= 0:
         metrics.append(metric("Accuracy vs verified GT (Test 1)", test1,
                               "Mean of B recall/precision vs the answer key."))
 
-    # Headline β (deployment) is the multiplier actually applied to the trust
-    # score's A-vs-B terms; the verified variant (with Test 1) is shown when it differs.
     beta_line = (
         f"β = {beta:.2f}"
         + (f"  ·  with Test 1: {beta_verified:.2f}" if test1 >= 0 and abs(beta_verified - beta) >= 0.005 else "")
+    )
+
+    # ---- Collapsible detail: the receipts behind each score ----------------
+    def _li(text: str, cls: str) -> html.Div:
+        return html.Div(text, className=f"gb-detail-item {cls}")
+
+    def _fmt_edge(e: dict[str, Any]) -> str:
+        return (f"{e.get('source','?')} --[{e.get('effect','?')} | via:{e.get('via_state','?')}]--> "
+                f"{e.get('target','?')}")
+
+    detail_blocks: list[Any] = []
+
+    # 1. Conformance — Graph B rule violations (red).
+    b_viol = [v for v in (rule_conformance or {}).get("violations", []) if v.get("graph") == "graph_b"]
+    conf_items = (
+        [_li(f"✗ {v.get('rule','?')}: {v.get('detail','')}", "gb-detail-bad") for v in b_viol]
+        if b_viol else [_li("✓ No rule violations in Graph B.", "gb-detail-ok")]
+    )
+    detail_blocks.append(html.Div(
+        [html.Div(f"Conformance validity {conf:.2f} — rule violations in Graph B ({len(b_viol)})",
+                  className="gb-detail-head"), *conf_items],
+        className="gb-detail-block",
+    ))
+
+    # 2. Vs declared threats — overlap of B's hazards with the threats block.
+    b_haz = _gb_hazard_ids(graph_b or {})
+    thr = {str(t.get("object_id", "")).strip().lower() for t in (threats or []) if str(t.get("object_id", "")).strip()}
+    threat_items: list[Any] = []
+    for k in sorted(b_haz & thr):
+        threat_items.append(_li(f"✓ {k}: hazard in both Graph B and threats", "gb-detail-ok"))
+    for k in sorted(b_haz - thr):
+        threat_items.append(_li(f"△ {k}: Graph B marks it hazardous, but it is not in the threats block", "gb-detail-warn"))
+    for k in sorted(thr - b_haz):
+        threat_items.append(_li(f"△ {k}: declared a threat, but Graph B does not mark it hazardous", "gb-detail-warn"))
+    if not threat_items:
+        threat_items = [_li("No hazards declared on either side.", "gb-detail-neutral")]
+    detail_blocks.append(html.Div(
+        [html.Div(f"Vs declared threats {threats_coh:.2f} — B hazards vs threats block",
+                  className="gb-detail-head"), *threat_items],
+        className="gb-detail-block",
+    ))
+
+    # 3. Accuracy vs verified GT — edge-level mismatches (only when a GT exists).
+    gv = gt_validation or {}
+    if test1 >= 0 and gv.get("available") and not gv.get("reason"):
+        diff = gv.get("b_edge_diff", {}) or {}
+        spurious = diff.get("spurious", []) or []
+        missed = diff.get("missed", []) or []
+        matched = diff.get("matched", []) or []
+        gt_items: list[Any] = []
+        for e in matched:
+            gt_items.append(_li(f"✓ matched: {_fmt_edge(e)}", "gb-detail-ok"))
+        for e in spurious:
+            gt_items.append(_li(f"✗ not in answer key (spurious): {_fmt_edge(e)}", "gb-detail-bad"))
+        for e in missed:
+            gt_items.append(_li(f"△ B missed (in answer key, not in B): {_fmt_edge(e)}", "gb-detail-warn"))
+        if not gt_items:
+            gt_items = [_li("No edges on either side.", "gb-detail-neutral")]
+        detail_blocks.append(html.Div(
+            [html.Div(f"Accuracy vs verified GT {test1:.2f} — edge matches vs the answer key "
+                      f"({len(matched)} matched, {len(spurious)} spurious, {len(missed)} missed)",
+                      className="gb-detail-head"), *gt_items],
+            className="gb-detail-block",
+        ))
+
+    detail = html.Details(
+        [html.Summary("Show the details behind each score"), *detail_blocks],
+        className="gb-trust-detail",
     )
 
     return html.Div(
@@ -8593,6 +8687,7 @@ def make_graph_b_trust_panel(trust: dict[str, Any]) -> html.Div:
                 ],
                 className="gb-trust-beta-row",
             ),
+            detail,
         ],
         className="gb-trust-panel",
     )
@@ -11417,6 +11512,18 @@ app.index_string = """<!DOCTYPE html>
             }
             .gb-trust-beta { font-size: 18px; font-weight: 700; }
             .gb-trust-beta-note { font-size: 11px; color: #64748b; flex: 1 1 240px; }
+            .gb-trust-detail { margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+            .gb-trust-detail > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #475569; }
+            .gb-detail-block { margin-top: 10px; }
+            .gb-detail-head { font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 4px; }
+            .gb-detail-item {
+                font-size: 12px; padding: 3px 8px; margin: 2px 0; border-radius: 5px;
+                border-left: 3px solid #cbd5e1; background: #f8fafc; font-family: ui-monospace, monospace;
+            }
+            .gb-detail-bad { border-left-color: #dc2626; background: #fef2f2; color: #991b1b; }
+            .gb-detail-warn { border-left-color: #ca8a04; background: #fefce8; color: #854d0e; }
+            .gb-detail-ok { border-left-color: #16a34a; background: #f0fdf4; color: #166534; }
+            .gb-detail-neutral { border-left-color: #cbd5e1; color: #64748b; }
             /* --- Pathology panel (card grid) ------------------------------ */
             .path-clean-state {
                 color: #166534;
@@ -12891,7 +12998,13 @@ def render_results(
     pathology_meaning = render_meaning_header(generate_pathology_meaning(normalized.get("pathologies", {})))
     accuracy_meaning = render_meaning_header(generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
     pre_trust_view = make_pre_intervention_trust_panel(normalized["pre_intervention_trust"])
-    graph_b_trust_view = make_graph_b_trust_panel(normalized["pre_intervention_trust"])
+    graph_b_trust_view = make_graph_b_trust_panel(
+        normalized["pre_intervention_trust"],
+        rule_conformance=normalized.get("rule_conformance", {}),
+        graph_b=normalized.get("graph_b", {}),
+        threats=normalized.get("threats", []),
+        gt_validation=normalized.get("gt_validation", {}),
+    )
     pathology_view = make_pathology_panel(normalized.get("pathologies", {}))
     gt_validation_view = make_gt_validation_panel(normalized.get("gt_validation", {}))
     consistency_view = html.Div(

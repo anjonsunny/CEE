@@ -411,8 +411,8 @@ End-to-end checks that exercise the full Qwen → GT pipeline.
 - **What:** Trust score weights the A-fidelity and B-coverage terms by β = B's validity, because Graph B is the yardstick those terms use but is itself the VLM's output. TWO scores are produced: headline (deployment) β = mean(B conformance validity, B-vs-threats coherence), which uses no answer key and drives the band; and a companion `score_with_test1` whose β also folds in B's Test 1 accuracy (mean B recall/precision, soft) when a verified GT exists. β = 1 reproduces the prior `0.40·Internal + 0.20·A-fid + 0.20·B-cov + 0.20·Coverage`; a malformed B (edge to a nonexistent node) drives the deployment β down, shrinks the agreement terms, and shifts the freed weight onto Internal. Verify: clean-B reproduction; malformed-B discount; the KEY PROPERTY that Test 1 does NOT move the headline (only the companion); Test 1 omitted when no GT (companion == headline); discount surfaced as a qualifier.
 - **Severity:** BLOCKING. **Status:** auto.
 
-### F8 — Graph B trust panel renders its own validity, not inside the trust card
-- **What:** `make_graph_b_trust_panel` surfaces B conformance validity, B-vs-threats coherence, optional Test 1 accuracy, and the resulting β. Empty-state when no components. Verifies B's validity scores live in their own section (above the trust card), not in the trust breakdown.
+### F8 — Graph B trust panel: scores + collapsible per-type detail
+- **What:** `make_graph_b_trust_panel` surfaces B conformance validity, B-vs-threats coherence, optional Test 1 accuracy, and the resulting β (empty-state when no components), in its own section above the trust card. It also renders a collapsible detail with three color-coded lists: the actual Graph B rule violations (red; graph_a violations excluded), the threats overlap (matched green / mismatched amber), and the Test 1 edge mismatches (matched green, spurious red, missed amber) from `gt_validation["b_edge_diff"]`. Verifies each list and that all three severity classes render.
 - **Severity:** BLOCKING. **Status:** auto.
 
 ### F9 — Single-run and batch trust are consistent (call-site guard)
