@@ -387,6 +387,23 @@ it against real captured run output so field-name drift can't slip through.
 
 ---
 
+## 16. Don't trust a ruler you haven't checked is straight
+
+**The story.** Two of the trust score's terms ask "does the model's recommendation graph (A) agree with the model's own independent causal graph (B)?" That only means something if B is itself sound. If B is garbage (edges pointing at entities that don't exist, invented effect words, a hazard it never listed as a threat), then "A agrees with B" tells you nothing, and "A disagrees with B" might just mean A was right and B was broken. We were measuring A against a ruler without checking the ruler was straight.
+
+**The rule.** Before the A-vs-B agreement terms count, discount them by how trustworthy B is. β (beta) = the average of B's validity signals: its own rule-conformance (is it structurally well-formed?), B-vs-threats coherence (do B's own hazards match the threats the model declared?), and, when a human-verified answer key exists for the scene, B's Test 1 accuracy (mean of B's recall and precision against that key). Each ranges 0 to 1. The agreement terms (A-fidelity, B-coverage) get multiplied by β; the weight that frees up moves onto the one signal that's always valid, the recommendation graph's internal alignment. A clean and accurate B leaves β = 1 and nothing changes; a broken or factually-wrong B quietly stops lending A unearned trust.
+
+The subtle part: a trust score's whole job is to work when you do NOT have the answer key, because at deployment there isn't one. If β used Test 1, the score you compute on a verified scene would be made by a different formula than the score a live scene gets, and any band you calibrate would be calibrated on the wrong ruler. That is train/deploy skew. So the card shows TWO totals:
+
+- **Total (deployment)** is the headline. β = mean(conformance validity, threats coherence). No answer key. This is what a live scene would score, and it drives the band.
+- **Total (with B Test 1)** is a companion shown only on verified scenes. β also folds in B's accuracy vs the answer key, so agreeing with a factually-wrong B counts for less. Because the weight it removes from agreement-with-B lands on Graph A's own coherence, this number can sit either side of the headline.
+
+Either way Test 1 is never a standalone term, so the gap the project exists to show is preserved: a model fluent and self-coherent (high internal alignment, the bulk of the weight) can still read as wrong against reality (low Test 1), because Test 1 never inflates the headline directly.
+
+**Where it lives.** `_graph_b_validity` and `assess_pre_intervention_trust` in main.py; the breakdown panel shows β and where the freed weight went. Test F4 checks both the clean-B reproduction of the old formula and the malformed-B discount. This is the resolution of parked decision O12.
+
+---
+
 ## The reasoning map: which rule forces which act of looking
 
 Every rule in the prompts quietly demands one act of reasoning. This table

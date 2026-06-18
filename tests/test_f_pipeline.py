@@ -62,13 +62,157 @@ def test_f3_consistency_scores_well_formed(main_module):
 
 
 # ---------------------------------------------------------------------------
-# F4 — Trust score aggregation.
-# Skipped unless we locate a trust_score formula entry point.
+# F4 — Trust score: Graph B validity (beta) discounts the A-vs-B agreement
+# terms. beta == 1 (clean B) reproduces the prior formula; a malformed B shifts
+# weight onto Graph A's own internal coherence.
 # ---------------------------------------------------------------------------
 @pytest.mark.blocking
-@pytest.mark.skip(reason="F4: trust score aggregation formula entry point not yet stable; revisit after report-builder refactor")
-def test_f4_trust_score_formula():
-    pass
+def test_f4_trust_b_validity_discount(main_module):
+    alignment = {"score": 0.90, "passed_checks": 10, "failed_checks": 0, "failures": []}
+    consistency = {
+        "a_fidelity": 0.80, "b_coverage": 0.70,
+        "a_fidelity_soft": 0.80, "b_coverage_soft": 0.70,
+        "topological_consistency": 0.90, "structural_consistency": 0.90,
+        "node_consistency": 1.0, "flag_consistency": 1.0,
+    }
+    # Graph A has an edge (avoids the no-threats short-circuit) and full coverage.
+    graph_a = {
+        "nodes": [{"id": "house_1", "label": "house", "state": "burning", "hazardous": True}],
+        "edges": [{"source": "house_1", "target": "house_1", "effect": "worsens", "via_state": "burning"}],
+        "threat_reasoning_coverage": 1.0,
+    }
+
+    # Clean B (empty → no violations, no hazard/threat mismatch): beta == 1.0,
+    # score reproduces 0.40*Internal + 0.20*Afid + 0.20*Bcov + 0.20*Coverage.
+    clean = main_module.assess_pre_intervention_trust(
+        alignment, consistency, graph_a, {"threat_reasoning_coverage": 1.0}, threats=[])
+    assert abs(clean["components"]["b_validity_beta"] - 1.0) < 1e-9
+    expected = 0.40 * 0.90 + 0.20 * 0.80 + 0.20 * 0.70 + 0.20 * 1.0
+    assert abs(clean["score"] - expected) < 1e-9, f"{clean['score']} != {expected}"
+
+    # Malformed B: edge to a nonexistent node (structural violation) AND a
+    # hazardous node with no matching threat → beta drives toward 0, the
+    # agreement terms are zeroed, weight moves onto Internal.
+    bad_b = {
+        "nodes": [{"id": "fire_1", "label": "fire", "state": "burning", "hazardous": True}],
+        "edges": [{"source": "fire_1", "target": "ghost_9", "effect": "may_harm", "via_state": "burning"}],
+        "threat_reasoning_coverage": 1.0,
+    }
+    bad = main_module.assess_pre_intervention_trust(
+        alignment, consistency, graph_a, bad_b, threats=[])
+    beta = bad["components"]["b_validity_beta"]
+    assert beta < 0.5, f"expected discounted beta, got {beta}"
+    # With beta≈0: score == (0.40 + 0.40)*Internal + 0.20*Coverage, agreement zeroed.
+    w_internal = 0.40 + (1.0 - beta) * 0.40
+    expected_bad = w_internal * 0.90 + beta * 0.20 * 0.80 + beta * 0.20 * 0.70 + 0.20 * 1.0
+    assert abs(bad["score"] - expected_bad) < 1e-9
+    # The discount is surfaced to the operator.
+    assert any("Graph B validity" in q for q in bad["qualifiers"])
+
+    # Test 1 (B vs verified GT) also discounts beta when available. A clean,
+    # threat-coherent B that nonetheless disagrees with the reference is a worse
+    # yardstick. Threat coherence kept at 1.0 (B's hazard matches the threat) so
+    # only the low Test 1 score moves beta below 1.
+    gv_low = {"available": True, "b_correctness_soft": 0.20, "b_precision_soft": 0.20}
+    coherent_b = {
+        "nodes": [{"id": "house_1", "label": "house", "state": "burning", "hazardous": True}],
+        "edges": [{"source": "house_1", "target": "house_1", "effect": "worsens", "via_state": "burning"}],
+        "threat_reasoning_coverage": 1.0,
+    }
+    threats = [{"object_id": "house_1"}]
+    with_t1 = main_module.assess_pre_intervention_trust(
+        alignment, consistency, graph_a, coherent_b, threats=threats, gt_validation=gv_low)
+    comp = with_t1["components"]
+    assert comp["b_test1_accuracy"] == 0.20
+    # Headline (deployment) beta excludes Test 1: mean(conformance 1.0, threats 1.0) = 1.0.
+    assert abs(comp["b_validity_beta"] - 1.0) < 1e-9
+    # Verified beta folds Test 1 in: mean(1.0, 1.0, 0.20).
+    assert abs(comp["b_validity_beta_verified"] - (1.0 + 1.0 + 0.20) / 3.0) < 1e-9
+    # KEY PROPERTY: Test 1 does NOT move the headline score (no answer-key leak);
+    # it only changes the companion score_with_test1.
+    headline_clean_b = main_module.assess_pre_intervention_trust(
+        alignment, consistency, graph_a, coherent_b, threats=threats, gt_validation=None)["score"]
+    assert abs(with_t1["score"] - headline_clean_b) < 1e-9
+    assert with_t1["score"] != with_t1["components"]["score_with_test1"]
+
+    # No GT → Test 1 omitted (not penalized): deployment == verified, companion == headline.
+    no_gt = main_module.assess_pre_intervention_trust(
+        alignment, consistency, graph_a, coherent_b, threats=threats, gt_validation=None)
+    assert no_gt["components"]["b_test1_accuracy"] == -1.0
+    assert abs(no_gt["components"]["b_validity_beta"] - 1.0) < 1e-9
+    assert abs(no_gt["components"]["score_with_test1"] - no_gt["score"]) < 1e-9
+
+
+# F8 — Graph B trust lives in its own panel (NOT the trust card). The panel
+# surfaces conformance validity, threats coherence, optional Test 1, and β.
+@pytest.mark.blocking
+def test_f8_graph_b_trust_panel(main_module):
+    def text_blobs(node):
+        out = []
+        ch = getattr(node, "children", None)
+        if isinstance(ch, str):
+            out.append(ch)
+        elif isinstance(ch, (list, tuple)):
+            for c in ch:
+                out.extend(text_blobs(c))
+        elif ch is not None:
+            out.extend(text_blobs(ch))
+        return out
+
+    # No components → empty state.
+    empty = main_module.make_graph_b_trust_panel({"components": {}})
+    assert "Run analysis" in " ".join(text_blobs(empty))
+
+    # B with violations on every edge → conformance validity 0 shown, β shown.
+    trust = {
+        "components": {
+            "b_conformance_validity": 0.0,
+            "b_threats_coherence": 1.0,
+            "b_test1_accuracy": 0.40,
+            "b_validity_beta": 0.50,
+            "b_validity_beta_verified": (0.0 + 1.0 + 0.40) / 3.0,
+        }
+    }
+    panel = main_module.make_graph_b_trust_panel(trust)
+    blob = " ".join(text_blobs(panel))
+    assert "Conformance validity" in blob and "0.00" in blob
+    assert "β = 0.50" in blob
+    assert "Test 1" in blob  # only shown because b_test1_accuracy >= 0
+
+
+# F9 — single-run and batch trust are consistent: EVERY call to
+# assess_pre_intervention_trust passes both threats= and gt_validation=, so all
+# three pipeline paths (normalize_result, the UI analysis path, the batch worker)
+# compute identical trust + Graph B validity. Guards against a new call site
+# silently dropping an arg.
+@pytest.mark.blocking
+def test_f9_trust_call_sites_pass_threats_and_gt(main_module):
+    import re
+    from pathlib import Path
+    src = Path(main_module.__file__).read_text()
+
+    calls = []
+    needle = "assess_pre_intervention_trust("
+    for m in re.finditer(re.escape(needle), src):
+        start = m.start()
+        # Skip the function definition itself.
+        if src[max(0, start - 4):start].rstrip().endswith("def"):
+            continue
+        # Capture the balanced-paren argument block.
+        i = m.end()
+        depth = 1
+        while i < len(src) and depth:
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+            i += 1
+        calls.append(src[m.start():i])
+
+    assert len(calls) >= 3, f"expected >=3 call sites, found {len(calls)}"
+    for c in calls:
+        assert "threats=" in c, f"call site missing threats=: {c[:80]}"
+        assert "gt_validation=" in c, f"call site missing gt_validation=: {c[:80]}"
 
 
 # ---------------------------------------------------------------------------

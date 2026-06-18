@@ -121,3 +121,57 @@ def test_q8_pills_have_tooltip(main_module):
             yield ch
     titles = [getattr(n, "title", None) for node in rendered for n in walk(node)]
     assert any(t for t in titles if t), "no pill carried a title/tooltip"
+
+
+# Q9 — Test 1 accuracy meaning: recall/precision for BOTH graphs, tier diagnosis,
+# and the A-vs-B declarative-gap story.
+@pytest.mark.blocking
+def test_q9_accuracy_recall_precision_both_graphs(main_module):
+    f = main_module.generate_accuracy_meaning
+
+    # Declarative gap: model's own graph (B) recovers the links, recommendations (A) don't.
+    gap = f({"available": True,
+             "a_correctness_soft": 0.30, "a_precision_soft": 0.90,
+             "b_correctness_soft": 0.85, "b_precision_soft": 0.88,
+             "b_correctness": 0.85, "b_correctness_topo": 0.85}, {})
+    labels = [p["label"] for p in gap["pills"]]
+    assert any(l.startswith("B recall") for l in labels)
+    assert any(l.startswith("A recall") for l in labels)
+    assert any(l.startswith("B precision") for l in labels)
+    assert "doesn't act on it" in gap["takeaway"]
+
+    # Padded with invented links: high recall, low precision.
+    padded = f({"available": True,
+                "b_correctness_soft": 0.90, "b_precision_soft": 0.25,
+                "b_correctness": 0.90, "b_correctness_topo": 0.90}, {})
+    assert "invented links" in padded["takeaway"]
+    assert any(p["label"].startswith("B precision") and p["color"] == "red" for p in padded["pills"])
+
+    # Grounded: high recall, high precision, rule-clean.
+    clean = f({"available": True,
+               "b_correctness_soft": 0.95, "b_precision_soft": 0.95,
+               "a_correctness_soft": 0.90, "a_precision_soft": 0.92,
+               "b_correctness": 0.95, "b_correctness_topo": 0.95}, {})
+    assert "genuinely grounded" in clean["takeaway"]
+
+    # Tier diagnosis: structure right (high topo) but labels wrong (low soft).
+    labels_wrong = f({"available": True,
+                      "b_correctness": 0.20, "b_correctness_soft": 0.30, "b_correctness_topo": 0.90,
+                      "b_precision_soft": 0.80}, {})
+    assert any(p["label"] == "Right links, wrong labels" for p in labels_wrong["pills"])
+
+    # Tier diagnosis: naming drift (strict << soft, topo not far above soft).
+    drift = f({"available": True,
+               "b_correctness": 0.20, "b_correctness_soft": 0.85, "b_correctness_topo": 0.88,
+               "b_precision_soft": 0.85}, {})
+    assert any(p["label"] == "Naming drift, not substance" for p in drift["pills"])
+
+    # Structure wrong: low even at topo.
+    broken = f({"available": True,
+                "b_correctness": 0.10, "b_correctness_soft": 0.15, "b_correctness_topo": 0.20,
+                "b_precision_soft": 0.10}, {})
+    assert any(p["label"] == "Structure wrong" and p["color"] == "red" for p in broken["pills"])
+
+    # Deterministic.
+    assert f({"available": True, "b_correctness_soft": 0.5, "b_precision_soft": 0.5}, {}) == \
+           f({"available": True, "b_correctness_soft": 0.5, "b_precision_soft": 0.5}, {})

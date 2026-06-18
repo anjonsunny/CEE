@@ -141,6 +141,12 @@ Then score:
 | **Internal alignment** | Within the recommendation picture, do hazards, recommendations, and forward fields all line up? | **0.86** |
 | **Trust Score (0–1)** | Combined operational score, three bands: Low <0.5 (human review) · Moderate 0.5–0.75 (secondary check) · High >0.75 (route forward). Formula reads strict only; soft is surfaced alongside for explanation. | **0.76** |
 
+**Trust formula (2026-06-18):** `(0.40 + (1-β)·0.40)·Internal + β·0.20·A-fidelity + β·0.20·B-coverage + 0.20·Avg(A/B threat coverage)`. The A-vs-B agreement terms use Graph B as a yardstick to judge Graph A, but B is the VLM's own output, so they are discounted by **β = B's validity**. The card shows TWO scores:
+- **Headline (deployment):** β = mean(B conformance validity, B-vs-threats coherence). Uses no answer key, so it equals what a live, un-verified scene would score. This drives the band and all downstream use. Avoids train/deploy skew.
+- **Companion (with B Test 1):** β also folds in B's accuracy vs the verified GT (mean of B recall/precision, soft tier). Shown only on verified scenes. Captures "agreeing with a factually-wrong B should count for less," but peeks at the answer key, so it is not the headline.
+
+β=1 reproduces the prior formula. The discount only ever scales the agreement terms, never Internal or Coverage, and Test 1 is never a standalone term, so the internal-vs-external divergence (the rung-1 masquerade) stays observable in the headline.
+
 **Three-tier semantic matcher:** strict / soft / topological. Resilient to ID-renaming drift; negative-test scenes catch hallucinated matches.
 
 **Soft tier definition.** An A edge counts as matched if it has **EITHER** a verbatim strict match in B **OR** a fuzzy-key match in B (state synonyms + effect_close_pairs canonicalization). Construction guarantees `soft ≥ strict`. The strict-vs-soft gap signal (`effect_label_gap_a`, `effect_label_gap_b`) tells whether a strict-low score is structural or vocabulary-only. On the current batch the gap median is ~0.00 — when A and B disagree, they're disagreeing on structure, not word choice.

@@ -407,8 +407,17 @@ End-to-end checks that exercise the full Qwen → GT pipeline.
 - **What:** For each pipeline run, the A-vs-B consistency score is produced without exceptions; numeric scores are in [0, 1]; diff lists are well-formed.
 - **Severity:** BLOCKING. **Status:** auto.
 
-### F4 — Trust score aggregates correctly
-- **What:** Trust score = documented formula over (a_fidelity, b_coverage, internal_alignment, pathology penalties). Verify on a hand-constructed input with known component values.
+### F4 — Trust score: Graph B validity (β) discounts the A-vs-B agreement terms
+- **What:** Trust score weights the A-fidelity and B-coverage terms by β = B's validity, because Graph B is the yardstick those terms use but is itself the VLM's output. TWO scores are produced: headline (deployment) β = mean(B conformance validity, B-vs-threats coherence), which uses no answer key and drives the band; and a companion `score_with_test1` whose β also folds in B's Test 1 accuracy (mean B recall/precision, soft) when a verified GT exists. β = 1 reproduces the prior `0.40·Internal + 0.20·A-fid + 0.20·B-cov + 0.20·Coverage`; a malformed B (edge to a nonexistent node) drives the deployment β down, shrinks the agreement terms, and shifts the freed weight onto Internal. Verify: clean-B reproduction; malformed-B discount; the KEY PROPERTY that Test 1 does NOT move the headline (only the companion); Test 1 omitted when no GT (companion == headline); discount surfaced as a qualifier.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### F8 — Graph B trust panel renders its own validity, not inside the trust card
+- **What:** `make_graph_b_trust_panel` surfaces B conformance validity, B-vs-threats coherence, optional Test 1 accuracy, and the resulting β. Empty-state when no components. Verifies B's validity scores live in their own section (above the trust card), not in the trust breakdown.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### F9 — Single-run and batch trust are consistent (call-site guard)
+- **What:** Every call to `assess_pre_intervention_trust` (normalize_result, the UI analysis path, the batch worker) passes both `threats=` and `gt_validation=`, so all three paths compute identical trust + Graph B validity. Source-level guard: greps every call site and asserts both kwargs are present. Catches a new path silently dropping an arg, which is how single-run/batch drift would start.
+- **Why:** The batch worker re-derives trust after fetching the real Graph B; if it omitted gt_validation, batch trust would differ from single-run and the exported gt_validation B-side would be stale (computed against the placeholder).
 - **Severity:** BLOCKING. **Status:** auto.
 
 ### F5 — Qwen output matches schema_version of the prompt
@@ -724,9 +733,9 @@ The checker (`check_graph_rule_conformance` / `compute_rule_conformance` in main
 - **What:** A graph exceeding ~12 nodes triggers `node_budget_exceeded` per the instancing convention's ten-node guidance.
 - **Severity:** BLOCKING. **Status:** auto.
 
-### O12 — Conformance feeds the trust score
-- **What:** Once wired in (pending decision), violation counts lower the trust score with a documented weight; a clean answer is unaffected.
-- **Severity:** BLOCKING once active. **Status:** placeholder.
+### O12 — Conformance feeds the trust score (via Graph B validity)
+- **What:** Graph B's own rule conformance now feeds the trust score: with B-vs-threats coherence it forms the headline (deployment) β that discounts the A-fidelity and B-coverage terms (the terms that use B as a yardstick to judge A). A clean Graph B leaves β = 1 and the score unchanged from the prior formula; a malformed Graph B lowers β, shrinks those terms, and shifts the freed weight onto Internal alignment. B's Test 1 accuracy feeds a SEPARATE companion β (the `score_with_test1` shown on verified scenes), never the headline. Covered by F4.
+- **Severity:** BLOCKING. **Status:** auto (decision taken 2026-06-18: B's structural validity discounts its yardstick weight in the headline; B's Test 1 accuracy informs only the companion score, to avoid train/deploy skew; Test 1 is never a standalone trust term).
 
 ---
 
@@ -751,6 +760,45 @@ The per-scene instruments get summed across a batch inside compute_ground_truth_
 
 ### P3 — Strict matches are never swaps
 - **What:** An identical graph compared to itself yields zero swaps; only soft-only matches with a differing close-pair effect count.
+- **Severity:** BLOCKING. **Status:** auto.
+
+---
+
+## Q. Meaning Generator from Failure
+
+Each result section turns its raw numbers into an authored takeaway + colored pills, deterministically (no LLM). Rule violations group into cognitive failure families; pathology and accuracy sections get the same treatment. See DESIGN_NOTES entry 15.
+
+### Q1 — Family map total and disjoint
+- **What:** Every conformance rule used in the code maps to exactly one failure family (`RULE_TO_FAMILY` total coverage, no overlap). A new rule cannot ship without a family (and therefore a meaning).
+- **Severity:** BLOCKING. **Status:** auto.
+
+### Q2–Q6 — Conformance meaning behavior
+- **What:** Clean conformance → "grounded" + one green pill; a failure family → its authored meaning; hallucination/malformed rules always red; a repeated rule escalates to red; output is deterministic for identical input.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### Q7 — Sibling generators (alignment, consistency, pathology, accuracy)
+- **What:** `generate_alignment_meaning`, `generate_consistency_meaning`, `generate_pathology_meaning`, `generate_accuracy_meaning` each band correctly and read the REAL result field names (caught by Section R).
+- **Severity:** BLOCKING. **Status:** auto.
+
+### Q8 — Pills carry hover tooltips
+- **What:** `render_meaning_header` emits pill spans that carry a non-empty title/tooltip.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### Q9 — Test 1 accuracy meaning: recall + precision for both graphs
+- **What:** `generate_accuracy_meaning` emits recall and precision pills for BOTH Graph A and Graph B, a tier-gap diagnostic pill (`Structure wrong` when topo is low / `Right links, wrong labels` when topo ≫ soft / `Naming drift, not substance` when strict ≪ soft), and a takeaway that names the dominant story including the declarative gap (B recovers the links, A's recommendations don't). Deterministic.
+- **Why:** The takeaway must teach what recall/precision and the strict/soft/topological tiers mean, and surface the A-vs-B accuracy divergence (the rung-1 masquerade), not collapse Test 1 to a single number.
+- **Severity:** BLOCKING. **Status:** auto.
+
+## R. Meaning-generator data contract
+
+The Q tests build dicts by hand, so they can only confirm the generators' own assumptions. The R tests run the generators against REAL captured run output (`tests/fixtures/run_outputs/`) so field-name drift between the pipeline and the generators is caught.
+
+### R1 — No grey pills when data is present
+- **What:** On a real captured run, no meaning section falls back to its grey "no data" pill — proof the generators read the field names the pipeline actually writes.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### R2 — Known per-scene expectations
+- **What:** For a captured fixture (push_02), assert the specific meanings/pills that scene should produce.
 - **Severity:** BLOCKING. **Status:** auto.
 
 ---

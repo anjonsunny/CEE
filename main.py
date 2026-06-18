@@ -2920,11 +2920,86 @@ def detect_pathologies(
     }
 
 
+def _graph_b_validity(
+    graph_b: dict[str, Any],
+    threats: list[dict[str, Any]] | None,
+    gt_validation: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    """How much we can trust Graph B as a yardstick for judging Graph A.
+
+    The trust score uses Graph B to evaluate Graph A (A-fidelity, B-coverage),
+    but B itself is the VLM's output and can be malformed or simply wrong. This
+    returns a validity weight beta in [0, 1] from up to three components:
+
+      conformance_validity — B's structural soundness, 1.0 = no rule
+        violations. A malformed B (edges to nonexistent nodes, invented
+        vocabulary, self-inconsistent fields) cannot be a reliable reference.
+      threats_coherence — does B's own hazard set agree with the model's
+        declared threats block? Jaccard overlap of {B hazardous node ids} and
+        {threat ids}. Both empty = 1.0.
+      test1_accuracy — when a verified GT exists, how well B matches the
+        reference: mean(B recall, B precision) on the soft tier. A B that
+        disagrees with the verified answer is a worse yardstick, even if it is
+        well-formed. Omitted (not penalized) when no GT is available.
+
+    beta = mean of the available components. Used to discount the A-vs-B
+    agreement terms: when B is questionable, its verdict on A earns
+    proportionally less weight, and the freed weight shifts onto Graph A's own
+    internal coherence. Test 1 is NOT a trust term here; it only modulates how
+    far B is trusted as a reference.
+    """
+    b_edges = graph_b.get("edges") or []
+    b_violations = check_graph_rule_conformance(graph_b or {}, "graph_b")
+    conformance_validity = 1.0 - min(1.0, len(b_violations) / max(1, len(b_edges)))
+
+    b_haz: set[str] = set()
+    for n in graph_b.get("nodes") or []:
+        state = canonicalize_state(str(n.get("state", "")).strip())
+        if n.get("hazardous") or state in HAZARD_BEARING_STATES:
+            key = str(n.get("id", "")).strip().lower()
+            if key:
+                b_haz.add(key)
+    thr = {
+        str(t.get("object_id", "")).strip().lower()
+        for t in (threats or []) if str(t.get("object_id", "")).strip()
+    }
+    if not b_haz and not thr:
+        threats_coherence = 1.0
+    else:
+        union = len(b_haz | thr)
+        threats_coherence = (len(b_haz & thr) / union) if union else 1.0
+
+    components = [conformance_validity, threats_coherence]
+
+    test1_accuracy = -1.0  # sentinel: not available
+    gv = gt_validation or {}
+    if gv.get("available") and not gv.get("reason"):
+        def _f(key: str, default: float = 0.0) -> float:
+            try:
+                return float(gv[key])
+            except (KeyError, TypeError, ValueError):
+                return default
+        b_recall = _f("b_correctness_soft", _f("b_correctness"))
+        b_precision = _f("b_precision_soft", _f("b_precision"))
+        test1_accuracy = (b_recall + b_precision) / 2.0
+        components.append(test1_accuracy)
+
+    beta = sum(components) / len(components)
+    return {
+        "beta": beta,
+        "conformance_validity": conformance_validity,
+        "threats_coherence": threats_coherence,
+        "test1_accuracy": test1_accuracy,  # -1.0 when no GT
+    }
+
+
 def assess_pre_intervention_trust(
     alignment: dict[str, Any],
     consistency: dict[str, Any],
     graph_a: dict[str, Any],
     graph_b: dict[str, Any],
+    threats: list[dict[str, Any]] | None = None,
+    gt_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Summarize whether the baseline causal account is trustworthy enough
     to interpret intervention shifts cleanly.
@@ -2971,8 +3046,45 @@ def assess_pre_intervention_trust(
     coverage_b = float(graph_b.get("threat_reasoning_coverage", 1.0) or 0.0)
     coverage = (coverage_a + coverage_b) / 2
 
-    score = (0.40 * internal) + (0.20 * a_fidelity) + (0.20 * b_edge_coverage) + (0.20 * coverage)
-    score_formula = "0.40*Internal + 0.20*A fidelity (strict) + 0.20*B edge coverage (strict) + 0.20*Avg(Graph A/B threat coverage)"
+    # Graph B is the yardstick for the A-vs-B agreement terms (A-fidelity,
+    # B-coverage), but B is the VLM's own output. Discount those terms by how
+    # much we can trust B; shift the freed weight onto Graph A's own internal
+    # coherence (the always-valid signal). beta == 1 reproduces the prior score.
+    b_validity = _graph_b_validity(graph_b, threats, gt_validation)
+    conf_validity = float(b_validity["conformance_validity"])
+    threats_coh = float(b_validity["threats_coherence"])
+    test1_acc = float(b_validity["test1_accuracy"])  # -1.0 when no GT
+
+    # We compute trust two ways and surface BOTH (see DESIGN_NOTES entry 16):
+    #   beta_deploy = mean(B conformance validity, B-vs-threats coherence)
+    #     The deployment-honest weight: uses NOTHING the answer key gave us, so
+    #     it is the same formula a live scene (no GT) would use. This is the
+    #     headline score and what drives the band + downstream use.
+    #   beta_verified = also folds in B's Test 1 accuracy when a verified GT
+    #     exists. Agreeing with a factually-wrong B counts for less. Shown
+    #     alongside on verified scenes; equals the headline when no GT.
+    beta_deploy = (conf_validity + threats_coh) / 2.0
+    beta_verified = (
+        (conf_validity + threats_coh + test1_acc) / 3.0 if test1_acc >= 0 else beta_deploy
+    )
+
+    w_agree = 0.40  # nominal weight of the agreement block (0.20 A-fid + 0.20 B-cov)
+
+    def _trust_score(b: float) -> float:
+        w_int = 0.40 + (1.0 - b) * w_agree
+        return (w_int * internal) + (b * 0.20 * a_fidelity) + (b * 0.20 * b_edge_coverage) + (0.20 * coverage)
+
+    # Headline = deployment-honest (no answer-key leak).
+    beta = beta_deploy
+    w_internal = 0.40 + (1.0 - beta) * w_agree
+    score = _trust_score(beta_deploy)
+    score_with_test1 = _trust_score(beta_verified)
+    score_formula = (
+        "(0.40 + (1-beta)*0.40)*Internal + beta*0.20*A fidelity (strict) "
+        "+ beta*0.20*B edge coverage (strict) + 0.20*Avg(Graph A/B threat coverage); "
+        "headline beta = mean(B conformance validity, B-vs-threats coherence); "
+        "companion 'with Test 1' beta also folds in B's accuracy vs verified GT"
+    )
     qualifiers: list[str] = []
 
     failures = alignment.get("failures", []) or []
@@ -3018,6 +3130,18 @@ def assess_pre_intervention_trust(
     if coverage_b < 1.0:
         orphans = graph_b.get("orphan_threats") or []
         qualifiers.append(f"Graph B leaves {len(orphans)} hazardous node(s) without outgoing causal reach.")
+    if beta < 0.999:
+        qualifiers.append(
+            f"Graph B validity {beta:.2f} (conformance {conf_validity:.2f}, threats coherence "
+            f"{threats_coh:.2f}): B is a partly unreliable yardstick, so its agreement with Graph A "
+            f"is discounted and that weight shifts onto Graph A's own internal coherence."
+        )
+    if test1_acc >= 0 and abs(score_with_test1 - score) >= 0.005:
+        qualifiers.append(
+            f"With B's Test 1 accuracy ({test1_acc:.2f}) folded in, trust is {score_with_test1:.2f} "
+            f"vs the deployment-honest {score:.2f}. The headline excludes the answer key so it matches "
+            f"what a live (un-verified) scene would score."
+        )
     if not qualifiers:
         qualifiers.append("Baseline causal account is internally coherent and mechanism agreement is strong.")
 
@@ -3087,6 +3211,14 @@ def assess_pre_intervention_trust(
             "effect_disagreement_count": effect_disagreement_count,
             "graph_a_coverage": coverage_a,
             "graph_b_coverage": coverage_b,
+            "b_validity_beta": beta,  # headline (deployment) beta
+            "b_validity_beta_verified": beta_verified,
+            "b_conformance_validity": conf_validity,
+            "b_threats_coherence": threats_coh,
+            "b_test1_accuracy": test1_acc,  # -1.0 when no GT
+            "score_with_test1": score_with_test1,
+            "effective_internal_weight": w_internal,
+            "effective_agreement_weight": beta * w_agree,
         },
         "score_formula": score_formula,
     }
@@ -3201,11 +3333,24 @@ def normalize_result(raw: dict[str, Any], image_contents: str | None = None) -> 
     # Consistency between Graph A (causal_graph) and Graph B is pure derivation.
     result["graph_consistency"] = compare_graphs(result["causal_graph"], result["graph_b"])
 
+    # External validation (Test 1): if a verified GT exists for this image,
+    # compute strict / soft / topological scores against it. Computed BEFORE
+    # trust because B's accuracy vs the reference feeds Graph B's validity (β).
+    # Test 1 is NOT a trust term; it only informs how far to trust B as a
+    # yardstick for judging A.
+    result["gt_validation"] = derive_gt_validation(
+        result.get("image_filename", ""),
+        result["causal_graph"],
+        result.get("graph_b", {}),
+    )
+
     result["pre_intervention_trust"] = assess_pre_intervention_trust(
         result["pre_internal_alignment"],
         result["graph_consistency"],
         result["causal_graph"],
         result["graph_b"],
+        threats=result.get("threats", []),
+        gt_validation=result.get("gt_validation"),
     )
 
     result["pathologies"] = detect_pathologies(
@@ -3218,17 +3363,10 @@ def normalize_result(raw: dict[str, Any], image_contents: str | None = None) -> 
     # Framework's algorithmic suppression ranking (independent of VLM).
     result["framework_suppression_picks"] = pick_suppression_framework(result["causal_graph"])
 
-    # Optional external validation: if a verified GT file exists for this image,
-    # compute strict / soft / topological scores against it. Surfaced in the UI
-    # next to the trust panel; does NOT affect the trust score.
-    result["gt_validation"] = derive_gt_validation(
-        result.get("image_filename", ""),
-        result["causal_graph"],
-        result.get("graph_b", {}),
-    )
-
     # Rule conformance (M7): the rulebook applied to the model's OWN graphs.
-    # No GT needed. Surface-only: does not feed the trust score yet.
+    # No GT needed. Surfaced in the UI; additionally, GRAPH B's conformance now
+    # feeds the trust score as one input to Graph B's validity (β). Graph A's
+    # conformance remains surface-only.
     result["rule_conformance"] = compute_rule_conformance(
         result["causal_graph"], result.get("graph_b", {})
     )
@@ -3442,8 +3580,9 @@ def check_graph_rule_conformance(graph: dict[str, Any], graph_name: str) -> list
 
 
 def compute_rule_conformance(graph_a: dict[str, Any], graph_b: dict[str, Any]) -> dict[str, Any]:
-    """Run the rulebook against both of the model's graphs. Surface-only:
-    shown in the UI, not yet part of the trust score (see MODULES.md M7)."""
+    """Run the rulebook against both of the model's graphs. Shown in the UI.
+    Graph B's conformance also feeds the trust score (one input to Graph B's
+    validity β); Graph A's conformance stays surface-only (see MODULES.md M7)."""
     violations = (
         check_graph_rule_conformance(graph_a or {}, "graph_a")
         + check_graph_rule_conformance(graph_b or {}, "graph_b")
@@ -6217,9 +6356,11 @@ def derive_gt_validation(
     graph_a: dict[str, Any],
     graph_b: dict[str, Any],
 ) -> dict[str, Any]:
-    """Surface-only external validation. If a verified GT file exists for the
-    image, compute strict/soft/topological scores; otherwise return a
-    "not available" placeholder. Does NOT affect trust score.
+    """External validation. If a verified GT file exists for the image, compute
+    strict/soft/topological scores; otherwise return a "not available"
+    placeholder. Does NOT affect the headline (deployment) trust score; B's
+    accuracy here feeds Graph B's validity (β) and the companion 'with Test 1'
+    trust total only.
     """
     if not image_filename:
         return {"available": False, "reason": "no image filename"}
@@ -6558,6 +6699,12 @@ def _process_one_image(
 
         # Prompt 1
         result = query_qwen(DEFAULT_PROMPT, caption or "", data_url, allow_inferred=allow_inferred)
+        # Set the persisted image_filename NOW (the namespaced name used in the
+        # export and in run_id below) so the GT lookup here uses the exact same
+        # name normalize_result will use when this run is later displayed. This
+        # keeps batch export-time trust identical to UI display-time trust.
+        ns_name = namespaced_image_name(img_path.name, category)
+        result["image_filename"] = ns_name
 
         # Prompt 2 (best-effort — failure here doesn't kill the run)
         try:
@@ -6566,13 +6713,21 @@ def _process_one_image(
             )
             result["graph_b"] = graph_b
             result["graph_consistency"] = compare_graphs(result["causal_graph"], graph_b)
-            # Re-derive trust now that Graph B is real (was computed against an empty
-            # placeholder during normalize_result).
+            # Re-derive trust now that Graph B is real (was computed against an
+            # empty placeholder during normalize_result). gt_validation must be
+            # recomputed against the real Graph B too — both so its B-side scores
+            # aren't stale, and so B's Test 1 accuracy can feed Graph B validity
+            # (β) exactly as in the single-run path.
+            result["gt_validation"] = derive_gt_validation(
+                result["image_filename"], result["causal_graph"], graph_b
+            )
             result["pre_intervention_trust"] = assess_pre_intervention_trust(
                 result.get("pre_internal_alignment", {}),
                 result["graph_consistency"],
                 result["causal_graph"],
                 graph_b,
+                threats=result.get("threats", []),
+                gt_validation=result.get("gt_validation"),
             )
             result["pathologies"] = detect_pathologies(
                 result["graph_consistency"],
@@ -6585,7 +6740,7 @@ def _process_one_image(
 
         # Disambiguated stem so images with the same basename in different
         # subfolders (e.g. fire/palisade/1.jpg vs flood/helene/1.jpg) don't collide.
-        ns_name = namespaced_image_name(img_path.name, category)
+        # ns_name == result["image_filename"], already set above.
         ns_stem = Path(ns_name).stem
 
         run_id = f"run_{datetime.now().strftime('%Y%m%dT%H%M%S')}_{ns_stem}"
@@ -6597,7 +6752,6 @@ def _process_one_image(
 
         # Save structured response
         result["run_id"] = run_id
-        result["image_filename"] = ns_name
         if category:
             result["disaster_category"] = category  # folder-based tag, separate from model's disaster_type
         payload = {
@@ -7404,8 +7558,10 @@ def make_gt_validation_panel(gt_validation: dict[str, Any]) -> html.Div:
                                 html.B("Topological "), "ignores state entirely — pure structure. Big strict→soft gap = ID-drift, not real disagreement.",
                             ]),
                             html.P([
-                                html.B("Surface-only: "),
-                                "these scores do NOT feed into the trust score. They sit alongside it as a separate, independent signal. "
+                                html.B("Trust relationship: "),
+                                "these scores do NOT feed the headline (deployment) trust score, which stays answer-key-free. "
+                                "B's accuracy here does feed Graph B's validity (β) and the companion 'with Test 1' trust total, "
+                                "so agreeing with a factually-wrong Graph B counts for less. "
                                 "Aggregate version (across many images) is the Test 1 numbers in batch reports.",
                             ], style={"fontStyle": "italic", "marginBottom": "0"}),
                         ],
@@ -7451,7 +7607,8 @@ def make_gt_validation_panel(gt_validation: dict[str, Any]) -> html.Div:
                 className="consistency-score-row gt-val-row",
             ),
             html.Div(
-                "Surface-only: these scores do not feed into the trust score. See Validation: Tests tab for aggregate Test 1 results across many images.",
+                "These scores do not feed the headline (deployment) trust score. B's accuracy here does inform "
+                "Graph B's validity and the companion 'with Test 1' trust total. See Validation: Tests tab for aggregate Test 1 results across many images.",
                 className="card-subtext",
                 style={"marginTop": "8px", "fontStyle": "italic"},
             ),
@@ -7518,8 +7675,8 @@ def make_pre_intervention_report_panel(
                         html.B("Per-run table "), "is the raw drill-down so you can find specific outliers.",
                     ]),
                     html.P([
-                        html.B("External Validation (surface-only): "),
-                        "Test 1 (verified GT comparison) and Test 2 (prompt sensitivity) verdicts appear in the report.md export. They are not part of the trust math — separate signals on the model's external validity, paired with the trust-based numbers but kept logically independent.",
+                        html.B("External Validation: "),
+                        "Test 1 (verified GT comparison) and Test 2 (prompt sensitivity) verdicts appear in the report.md export. They are not part of the headline trust math; the headline stays answer-key-free so the internal-vs-external gap stays visible. B's Test 1 accuracy does feed Graph B's validity and the per-scene companion 'with Test 1' trust total.",
                     ], style={"fontStyle": "italic", "marginBottom": "0"}),
                 ],
                 className="gt-val-explainer-body",
@@ -8118,6 +8275,78 @@ def make_pathology_panel(pathologies: dict[str, Any]) -> html.Div:
     )
 
 
+def make_graph_b_trust_panel(trust: dict[str, Any]) -> html.Div:
+    """Small standalone panel: how far Graph B can be trusted as a yardstick.
+
+    Graph B is the independent VLM graph that the trust score uses to judge
+    Graph A. Its own reliability (β) lives here, OUT of the trust card, so the
+    trust card stays about Graph A. β scales the A-vs-B agreement terms in the
+    trust score; the inputs to β are shown so a low β is explainable.
+    """
+    components = (trust or {}).get("components", {}) or {}
+    if "b_conformance_validity" not in components:
+        return html.Div("Run analysis to estimate Graph B trust.", className="empty-state")
+
+    conf = float(components.get("b_conformance_validity", 1.0) or 0.0)
+    threats = float(components.get("b_threats_coherence", 1.0) or 0.0)
+    test1 = float(components.get("b_test1_accuracy", -1.0))
+    beta = float(components.get("b_validity_beta", 1.0) or 0.0)
+    beta_verified = float(components.get("b_validity_beta_verified", beta) or 0.0)
+
+    def band(x: float) -> str:
+        return "high" if x >= 0.70 else ("moderate" if x >= 0.40 else "low")
+
+    def metric(label: str, value: float, note: str) -> html.Div:
+        return html.Div(
+            [
+                html.Div(label, className="gb-trust-metric-label"),
+                html.Div(f"{value:.2f}", className=f"gb-trust-metric-value trust-{band(value)}"),
+                html.Div(note, className="gb-trust-metric-note"),
+            ],
+            className="gb-trust-metric",
+        )
+
+    metrics = [
+        metric("Conformance validity", conf,
+               "Share of B's edges with no rule violation. 0 = every edge breaks a rule."),
+        metric("Vs declared threats", threats,
+               "Overlap of B's own hazards with the threats block."),
+    ]
+    if test1 >= 0:
+        metrics.append(metric("Accuracy vs verified GT (Test 1)", test1,
+                              "Mean of B recall/precision vs the answer key."))
+
+    # Headline β (deployment) is the multiplier actually applied to the trust
+    # score's A-vs-B terms; the verified variant (with Test 1) is shown when it differs.
+    beta_line = (
+        f"β = {beta:.2f}"
+        + (f"  ·  with Test 1: {beta_verified:.2f}" if test1 >= 0 and abs(beta_verified - beta) >= 0.005 else "")
+    )
+
+    return html.Div(
+        [
+            html.Div(
+                "How far Graph B can be trusted as a yardstick for judging Graph A. This β scales the "
+                "A-vs-B agreement terms in the trust score below; it does not score Graph A itself.",
+                className="card-subtext card-subtitle",
+            ),
+            html.Div(metrics, className="gb-trust-metrics-row"),
+            html.Div(
+                [
+                    html.Div(beta_line, className=f"gb-trust-beta trust-{band(beta)}"),
+                    html.Div(
+                        "Mean of the signals above (Test 1 only feeds the 'with Test 1' variant, which "
+                        "the trust card shows as a companion total, never the headline).",
+                        className="gb-trust-beta-note",
+                    ),
+                ],
+                className="gb-trust-beta-row",
+            ),
+        ],
+        className="gb-trust-panel",
+    )
+
+
 def make_pre_intervention_trust_panel(trust: dict[str, Any]) -> html.Div:
     """Render baseline trust summary with explicit breakdown and meaning.
 
@@ -8153,8 +8382,13 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any]) -> html.Div:
     cov_a = float(components.get("graph_a_coverage", 0.0) or 0.0)
     cov_b = float(components.get("graph_b_coverage", 0.0) or 0.0)
     cov_avg = (cov_a + cov_b) / 2
-
-    GAP_VISIBLE_THRESHOLD = 0.05  # below this, the strict/soft distinction isn't worth surfacing
+    # Graph B validity discount (β). Older stored results lack these fields →
+    # beta=1, reproducing the prior 0.40 / 0.20 / 0.20 / 0.20 weighting. The β
+    # inputs (conformance, threats coherence, Test 1) are shown in the separate
+    # "How much can we trust Graph B?" panel, not here.
+    beta = float(components.get("b_validity_beta", 1.0) or 0.0)
+    w_internal = float(components.get("effective_internal_weight", 0.40) or 0.0)
+    w_each = float(components.get("effective_agreement_weight", beta * 0.40) or 0.0) / 2.0
 
     def main_row(name: str, value: float, weight: float, rationale: str) -> html.Div:
         return html.Div(
@@ -8190,39 +8424,93 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any]) -> html.Div:
             className="breakdown-row breakdown-soft-row",
         )
 
-    breakdown_rows = [main_row("Internal alignment", internal, 0.40, "Layer 2 contract checks (most fundamental).")]
-    breakdown_rows.append(main_row("A-fidelity (strict)", a_fid, 0.20, "Recs grounded in model's own beliefs."))
-    if gap_a >= GAP_VISIBLE_THRESHOLD:
-        breakdown_rows.append(soft_row("A-fidelity", a_fid_soft, gap_a))
-    breakdown_rows.append(main_row("B-coverage (strict)", b_cov, 0.20, "Recs cover what model believes."))
-    if gap_b >= GAP_VISIBLE_THRESHOLD:
-        breakdown_rows.append(soft_row("B-coverage", b_cov_soft, gap_b))
+    internal_rationale = "Layer 2 contract checks (most fundamental)."
+    if beta < 0.999:
+        internal_rationale += " Weight raised to absorb the discount on the A-vs-B block."
+    breakdown_rows = [main_row("Internal alignment", internal, w_internal, internal_rationale)]
+    breakdown_rows.append(main_row("A-fidelity (strict)", a_fid, w_each, "Recs grounded in model's own beliefs (weighted by Graph B validity)."))
+    breakdown_rows.append(soft_row("A-fidelity", a_fid_soft, gap_a))
+    breakdown_rows.append(main_row("B-coverage (strict)", b_cov, w_each, "Recs cover what model believes (weighted by Graph B validity)."))
+    breakdown_rows.append(soft_row("B-coverage", b_cov_soft, gap_b))
     breakdown_rows.append(main_row("Threat coverage (avg)", cov_avg, 0.20, "Declared threats produce edges."))
+
+    # When Graph B is a weak yardstick (β < 1) the agreement weights above are
+    # below 0.20. We only POINT to where β comes from; the actual Graph B
+    # validity scores live in their own panel above this card.
+    if beta < 0.999:
+        breakdown_rows.append(
+            html.Div(
+                [
+                    html.Div("↪ agreement weights discounted", className="breakdown-name breakdown-soft-name"),
+                    html.Div("", className="breakdown-value"),
+                    html.Div("", className="breakdown-times"),
+                    html.Div(f"{w_each:.2f}", className="breakdown-weight breakdown-soft-gap"),
+                    html.Div("", className="breakdown-equals"),
+                    html.Div("", className="breakdown-contribution"),
+                    html.Div(
+                        f"A-fidelity and B-coverage carry {w_each:.2f} (not 0.20) because Graph B "
+                        f"is a partly unreliable yardstick (β={beta:.2f}); the freed weight moved "
+                        f"onto Internal alignment. See the Graph B trust panel above.",
+                        className="breakdown-rationale breakdown-soft-rationale",
+                    ),
+                ],
+                className="breakdown-row breakdown-soft-row",
+            )
+        )
 
     breakdown_total = html.Div(
         [
-            html.Div("Total (strict)", className="breakdown-name breakdown-total-name"),
+            html.Div("Total (deployment)", className="breakdown-name breakdown-total-name"),
             html.Div("", className="breakdown-value"),
             html.Div("", className="breakdown-times"),
             html.Div("", className="breakdown-weight"),
             html.Div("=", className="breakdown-equals"),
             html.Div(f"{score:.3f}", className=f"breakdown-contribution breakdown-total-value {level_class}"),
-            html.Div("Headline trust score (the number used downstream).", className="breakdown-rationale"),
+            html.Div("Headline trust score (drives the band + downstream). Uses no answer key, "
+                     "so it equals what a live, un-verified scene would score.", className="breakdown-rationale"),
         ],
         className="breakdown-row breakdown-total-row",
     )
 
-    # Companion "Total (soft)" row: what the score would be if the formula
-    # used the soft tier on A/B. Surfaced only when at least one gap is
-    # meaningful, since otherwise it would just duplicate the strict total.
+    # Companion "with B Test 1" total: same formula but beta also folds in B's
+    # accuracy vs the verified reference. Shown only on verified scenes where it
+    # differs, so the operator sees both the deployment-honest number and the
+    # "agreeing with a wrong B counts less" number.
+    score_with_test1 = float(components.get("score_with_test1", score) or 0.0)
+    b_test1_acc_for_total = float(components.get("b_test1_accuracy", -1.0))
+    breakdown_total_test1 = None
+    if b_test1_acc_for_total >= 0 and abs(score_with_test1 - score) >= 0.005:
+        t1_delta = score_with_test1 - score
+        breakdown_total_test1 = html.Div(
+            [
+                html.Div("Total (with B Test 1)", className="breakdown-name breakdown-total-name breakdown-soft-name"),
+                html.Div("", className="breakdown-value"),
+                html.Div("", className="breakdown-times"),
+                html.Div("", className="breakdown-weight"),
+                html.Div(f"{t1_delta:+.3f}", className="breakdown-equals breakdown-soft-gap"),
+                html.Div(f"{score_with_test1:.3f}", className="breakdown-contribution breakdown-total-value breakdown-soft-total"),
+                html.Div(
+                    f"If beta also folds in B's accuracy vs the verified answer key "
+                    f"({b_test1_acc_for_total:.2f}). Not the headline: it peeks at the answer key, so it "
+                    f"only exists on verified scenes. A less accurate B shifts weight off agreement-with-B "
+                    f"and onto Graph A's own coherence, so this can sit either side of the headline.",
+                    className="breakdown-rationale breakdown-soft-rationale",
+                ),
+            ],
+            className="breakdown-row breakdown-total-row breakdown-soft-row",
+        )
+
+    # Companion "Total (soft)" row: what the score would be if the formula used
+    # the soft tier on A/B. Always shown so the soft version is visible even when
+    # it equals strict (delta +0.000 = no effect-label vocabulary divergence).
     soft_score = (
-        0.40 * internal
-        + 0.20 * a_fid_soft
-        + 0.20 * b_cov_soft
+        w_internal * internal
+        + w_each * a_fid_soft
+        + w_each * b_cov_soft
         + 0.20 * cov_avg
     )
     soft_score_delta = max(0.0, soft_score - score)
-    show_soft_total = (gap_a >= GAP_VISIBLE_THRESHOLD) or (gap_b >= GAP_VISIBLE_THRESHOLD)
+    show_soft_total = True
     breakdown_total_soft = (
         html.Div(
             [
@@ -8375,6 +8663,7 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any]) -> html.Div:
                             ),
                             *breakdown_rows,
                             breakdown_total,
+                            *([breakdown_total_test1] if breakdown_total_test1 is not None else []),
                             *([breakdown_total_soft] if breakdown_total_soft is not None else []),
                         ],
                         className="breakdown-table",
@@ -8969,33 +9258,132 @@ def generate_pathology_meaning(pathologies: dict[str, Any]) -> dict[str, Any]:
             "pills": pills}
 
 
+def _accuracy_band(x: float) -> str:
+    return "green" if x >= 0.70 else ("amber" if x >= 0.40 else "red")
+
+
 def generate_accuracy_meaning(gt_validation: dict[str, Any], conformance: dict[str, Any]) -> dict[str, Any]:
-    """Meaning generator for the How-accurate section. Band on the Test-1
-    topological score, CROSSED with conformance: high accuracy + clean = grounded;
-    low accuracy + a failure family = associative, and we name the family."""
+    """Meaning generator for the How-accurate (Test 1) section.
+
+    Test 1 compares the model's two graphs against a verified reference and
+    reports, for each graph, RECALL (correctness: of the real links, how many
+    did the model find — low = blind spots) and PRECISION (of the links it
+    asserted, how many are real — low = invented/hallucinated links), at three
+    tiers: strict (verbatim ids+labels), soft (id/synonym-tolerant, the
+    load-bearing number), and topological (structure only, labels ignored).
+
+    The takeaway names the dominant story (Graph B = the model's own causal
+    belief; Graph A = its recommendations). Recall vs precision and the tier
+    gaps each carry a distinct meaning, surfaced in the takeaway and tooltips.
+    """
     g = gt_validation or {}
     if not g or not g.get("available", True) or g.get("reason"):
         return {"takeaway": "No verified ground truth for this scene; accuracy not measured.",
                 "pills": [{"label": "No GT", "count": 0, "color": "grey",
                            "tooltip": (g or {}).get("reason", "No verified GT file for this image.")}]}
-    score = g.get("b_correctness_topo", g.get("overall_topo", g.get("score")))
-    try:
-        s = float(score)
-    except (TypeError, ValueError):
+
+    def fv(key: str):
+        try:
+            return float(g[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def headline(prefix: str):
+        """(value, strict, soft, topo) — value is soft, else topo, else strict."""
+        strict, soft, topo = fv(prefix), fv(prefix + "_soft"), fv(prefix + "_topo")
+        val = soft if soft is not None else (topo if topo is not None else strict)
+        return val, strict, soft, topo
+
+    a_rec, a_rec_s, a_rec_soft, a_rec_t = headline("a_correctness")
+    a_prec, _, _, _ = headline("a_precision")
+    b_rec, b_rec_s, b_rec_soft, b_rec_t = headline("b_correctness")
+    b_prec, _, _, _ = headline("b_precision")
+
+    if a_rec is None and b_rec is None and a_prec is None and b_prec is None:
         return {"takeaway": "Accuracy score unavailable for this scene.",
                 "pills": [{"label": "n/a", "count": 0, "color": "grey", "tooltip": "No comparable score."}]}
+
     fam = (generate_conformance_meaning(conformance or {}) or {}).get("families") or {}
-    band = "green" if s >= 0.70 else ("amber" if s >= 0.40 else "red")
-    pill = {"label": f"Accuracy {s:.2f}", "count": 0, "color": band,
-            "tooltip": "Topological agreement with the verified ground truth (structure, vocabulary-tolerant)."}
-    if s >= 0.70 and not fam:
-        takeaway = f"Close to the verified answer ({s:.2f}) AND rule-clean: this scene is genuinely grounded."
-    elif s < 0.40 and fam:
-        dom = FAILURE_FAMILIES[max(fam, key=fam.get)]["label"].lower()
-        takeaway = (f"Far from the verified answer ({s:.2f}) and {dom}: the model's picture is associative, not grounded.")
+
+    def tiers_str(strict, soft, topo) -> str:
+        parts = []
+        if strict is not None: parts.append(f"strict {strict:.2f}")
+        if soft is not None: parts.append(f"soft {soft:.2f}")
+        if topo is not None: parts.append(f"topological {topo:.2f}")
+        return ", ".join(parts)
+
+    pills: list[dict[str, Any]] = []
+    if b_rec is not None:
+        pills.append({"label": f"B recall {b_rec:.2f}", "count": 0, "color": _accuracy_band(b_rec),
+                      "tooltip": (f"Graph B (the model's own causal graph) recovered this share of the "
+                                  f"verified links. Recall = coverage of real links; low = blind spots. "
+                                  f"Tiers: {tiers_str(b_rec_s, b_rec_soft, b_rec_t)}.")})
+    if b_prec is not None:
+        pills.append({"label": f"B precision {b_prec:.2f}", "count": 0, "color": _accuracy_band(b_prec),
+                      "tooltip": ("Of the links Graph B asserted, this share are in the reference. "
+                                  "Precision = how many claims are real; low = invented/hallucinated links.")})
+    if a_rec is not None:
+        pills.append({"label": f"A recall {a_rec:.2f}", "count": 0, "color": _accuracy_band(a_rec),
+                      "tooltip": (f"Graph A (built from the recommendations) recovered this share of the "
+                                  f"verified links. Low = the recommended actions skip real causal links. "
+                                  f"Tiers: {tiers_str(a_rec_s, a_rec_soft, a_rec_t)}.")})
+    if a_prec is not None:
+        pills.append({"label": f"A precision {a_prec:.2f}", "count": 0, "color": _accuracy_band(a_prec),
+                      "tooltip": ("Of Graph A's links, this share are in the reference. Low = the "
+                                  "recommendations rest on causal claims the reference doesn't endorse.")})
+
+    # Tier-gap diagnostic on the model's own graph B (falls back to A): the gap
+    # between tiers tells you WHAT kind of disagreement it is.
+    rs, rsoft, rt = (b_rec_s, b_rec_soft, b_rec_t) if b_rec is not None else (a_rec_s, a_rec_soft, a_rec_t)
+    which = "Graph B" if b_rec is not None else "Graph A"
+    if rt is not None and rt < 0.40:
+        pills.append({"label": "Structure wrong", "count": 0, "color": "red",
+                      "tooltip": (f"Even ignoring labels, {which}'s connections don't match the reference "
+                                  f"(topological {rt:.2f}): a real structural disagreement, not vocabulary.")})
+    elif rt is not None and rsoft is not None and (rt - rsoft) >= 0.30:
+        pills.append({"label": "Right links, wrong labels", "count": 0, "color": "amber",
+                      "tooltip": (f"{which} matches the reference on which entities connect "
+                                  f"(topological {rt:.2f}) but not on effect labels/states (soft {rsoft:.2f}): "
+                                  f"it sees the structure but mislabels the mechanism.")})
+    elif rsoft is not None and rs is not None and (rsoft - rs) >= 0.30:
+        pills.append({"label": "Naming drift, not substance", "count": 0, "color": "amber",
+                      "tooltip": (f"{which}'s strict score ({rs:.2f}) is far below its soft score ({rsoft:.2f}): "
+                                  f"it got the structure and meaning right but used different ids or synonyms. "
+                                  f"Not a real disagreement.")})
+
+    # Takeaway: pick the dominant story.
+    def lo(x): return x is not None and x < 0.40
+    def hi(x): return x is not None and x >= 0.70
+    min_prec = min([p for p in (a_prec, b_prec) if p is not None], default=None)
+
+    if hi(b_rec) and lo(a_rec):
+        takeaway = (f"The model's own causal graph recovers {b_rec:.0%} of the verified links, but its "
+                    f"recommendations only {a_rec:.0%}: it sees the structure and doesn't act on it "
+                    f"(declarative, not grounded).")
+    elif hi(a_rec) and lo(b_rec):
+        takeaway = (f"The recommendations match the verified answer ({a_rec:.0%}) but the model's own graph "
+                    f"does not ({b_rec:.0%}): the right actions for an unstated reason.")
+    elif hi(b_rec) and (a_rec is None or hi(a_rec)) and min_prec is not None and min_prec < 0.40:
+        takeaway = (f"Recovers most of the real links (recall {b_rec:.2f}) but also asserts ones the reference "
+                    f"rejects (precision {min_prec:.2f}): the causal picture is padded with invented links.")
+    elif hi(b_rec) and (a_rec is None or hi(a_rec)) and not fam:
+        takeaway = (f"Recovers the verified links (recall {b_rec:.2f}) with few spurious ones AND rule-clean: "
+                    f"genuinely grounded on this scene.")
+    elif lo(b_rec) and (a_rec is None or lo(a_rec)):
+        if fam:
+            dom = FAILURE_FAMILIES[max(fam, key=fam.get)]["label"].lower()
+            takeaway = (f"Far from the verified answer (recall {b_rec:.2f}) and {dom}: the model's picture is "
+                        f"associative, not grounded.")
+        else:
+            takeaway = (f"Neither graph recovers much of the verified answer (recall {b_rec:.2f}): the causal "
+                        f"structure is wrong here, not just unspoken.")
     else:
-        takeaway = f"Topological agreement with the verified answer: {s:.2f}."
-    return {"takeaway": takeaway, "pills": [pill]}
+        b_txt = f"{b_rec:.2f}" if b_rec is not None else "n/a"
+        a_txt = f"{a_rec:.2f}" if a_rec is not None else "n/a"
+        takeaway = (f"Partial agreement with the verified answer (recall: own graph {b_txt}, recommendations "
+                    f"{a_txt}). Check precision pills for invented links.")
+
+    return {"takeaway": takeaway, "pills": pills}
 
 
 def serve_layout():
@@ -9178,6 +9566,10 @@ def serve_layout():
                                                     "Trust Reading",
                                                     "All things considered: one trust reading for this scene.",
                                                     [
+                                                        html.Div(
+                                                            className="result-row",
+                                                            children=[card("How much can we trust Graph B?", "graph-b-trust-card", "wide full-row")],
+                                                        ),
                                                         html.Div(
                                                             className="result-row",
                                                             children=[card("Baseline Trust", "pre-trust-card", "wide full-row")],
@@ -10758,6 +11150,22 @@ app.index_string = """<!DOCTYPE html>
             .trust-high { color: #15803d; }
             .trust-moderate { color: #b45309; }
             .trust-low { color: #b91c1c; }
+            /* --- Graph B trust panel (small, above the trust card) -------- */
+            .gb-trust-panel { display: flex; flex-direction: column; gap: 10px; }
+            .gb-trust-metrics-row { display: flex; flex-wrap: wrap; gap: 12px; }
+            .gb-trust-metric {
+                flex: 1 1 180px; min-width: 160px;
+                border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; background: #f8fafc;
+            }
+            .gb-trust-metric-label { font-size: 12px; font-weight: 600; color: #475569; }
+            .gb-trust-metric-value { font-size: 22px; font-weight: 700; line-height: 1.2; margin: 2px 0; }
+            .gb-trust-metric-note { font-size: 11px; color: #64748b; }
+            .gb-trust-beta-row {
+                display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+                border-top: 1px solid #e2e8f0; padding-top: 8px;
+            }
+            .gb-trust-beta { font-size: 18px; font-weight: 700; }
+            .gb-trust-beta-note { font-size: 11px; color: #64748b; flex: 1 1 240px; }
             /* --- Pathology panel (card grid) ------------------------------ */
             .path-clean-state {
                 color: #166534;
@@ -12134,12 +12542,19 @@ def analyze_scene(
             result["graph_b"] = graph_b
             # Re-derive consistency now that graph_b is populated.
             result["graph_consistency"] = compare_graphs(result["causal_graph"], graph_b)
-            # Re-derive trust too — it was first computed against the empty placeholder.
+            # Recompute gt_validation against the real Graph B (not the placeholder)
+            # and re-derive trust, mirroring the batch worker and normalize_result
+            # so all three paths produce identical trust + Graph B validity (β).
+            result["gt_validation"] = derive_gt_validation(
+                result.get("image_filename", ""), result["causal_graph"], graph_b
+            )
             result["pre_intervention_trust"] = assess_pre_intervention_trust(
                 result.get("pre_internal_alignment", {}),
                 result["graph_consistency"],
                 result["causal_graph"],
                 graph_b,
+                threats=result.get("threats", []),
+                gt_validation=result.get("gt_validation"),
             )
             result["pathologies"] = detect_pathologies(
                 result["graph_consistency"],
@@ -12168,6 +12583,7 @@ def analyze_scene(
     Output("pre-internal-alignment-card", "children"),
     Output("rule-conformance-card", "children"),
     Output("graph-consistency-card", "children"),
+    Output("graph-b-trust-card", "children"),
     Output("pre-trust-card", "children"),
     Output("pathology-card", "children"),
     Output("gt-validation-card", "children"),
@@ -12224,6 +12640,7 @@ def render_results(
     pathology_meaning = render_meaning_header(generate_pathology_meaning(normalized.get("pathologies", {})))
     accuracy_meaning = render_meaning_header(generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
     pre_trust_view = make_pre_intervention_trust_panel(normalized["pre_intervention_trust"])
+    graph_b_trust_view = make_graph_b_trust_panel(normalized["pre_intervention_trust"])
     pathology_view = make_pathology_panel(normalized.get("pathologies", {}))
     gt_validation_view = make_gt_validation_panel(normalized.get("gt_validation", {}))
     consistency_view = html.Div(
@@ -12279,6 +12696,7 @@ def render_results(
         pre_alignment_view,
         rule_conformance_view,
         consistency_view,
+        graph_b_trust_view,
         pre_trust_view,
         pathology_view,
         gt_validation_view,

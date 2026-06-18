@@ -69,7 +69,7 @@ shallow checks.
   head, or several?" A self-contradicting answer cannot come from a single
   causal model of the scene.
 
-### M7. Rule conformance checker (built this turn, surface-only for now)
+### M7. Rule conformance checker (built; Graph B's conformance now feeds trust)
 - **What:** Does the model's answer obey the rulebook? Example: water
   may_harm an already-flooded house breaks the label triad.
 - **Groundedness question:** "Did it look, or did it guess from habit?"
@@ -131,8 +131,14 @@ column two.
   2026-06-11: grouped into five collapsible sections following the module
   levels (scene reading → graphs → self-checks → GT checks → trust). Test H5
   pins the ids and ordering.
-- Rule conformance not yet wired into the trust score (deliberate: changing
-  the score formula mid-verification would churn results). Its BATCH tally
-  exists (P-series): the Test 1 report now sums violations per rule across
-  all runs and counts close-pair vocabulary swaps per matched pair.
+- Rule conformance now feeds the trust score on the GRAPH B side: B's
+  conformance validity is one input to Graph B's validity weight (β), which
+  discounts the A-vs-B agreement terms (2026-06-18, resolves O12). Graph A's
+  conformance is still surface-only. Its BATCH tally exists (P-series): the
+  Test 1 report sums violations per rule across all runs and counts close-pair
+  vocabulary swaps per matched pair. The batch worker recomputes gt_validation
+  against the real Graph B and passes threats + gt_validation to trust, so batch
+  trust equals single-run trust (guarded by test F9). NOTE: the batch REPORT
+  does not yet surface Graph B validity (β) or the companion 'with Test 1' trust
+  variant; batch trust aggregates the headline (deployment) score only.
 - K-series behavioral tests await captured model outputs against goldens.
