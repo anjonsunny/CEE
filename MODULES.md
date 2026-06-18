@@ -143,5 +143,8 @@ column two.
   Test 1 availability / companion divergence — in both the markdown export and
   the report panel (P5). Batch trust still aggregates the headline (deployment)
   score; the companion 'with Test 1' variant is reported as a divergence count,
-  not a separate aggregate.
+  not a separate aggregate. The batch report also rolls rule violations up into
+  the Meaning Generator's cognitive failure families (`family_rollup`, P6):
+  dominant family + authored meaning/impact at the corpus level, matching the
+  single-run takeaway.
 - K-series behavioral tests await captured model outputs against goldens.

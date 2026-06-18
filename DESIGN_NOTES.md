@@ -385,6 +385,12 @@ overlap), so a new rule cannot be added without giving it a meaning. The rest
 of the Q-series tests the generator logic; the R-series (data-contract) tests
 it against real captured run output so field-name drift can't slip through.
 
+The same family framing is rolled up across a batch by `compute_family_rollup`
+(carried in the report as `family_rollup`, rendered in the markdown export and
+the report panel, tested by P6): which kind of blindness dominates the corpus,
+in how many scenes, and what it costs a decision-maker. So the "what the breaks
+MEAN" reading exists at both the single-scene and corpus levels.
+
 ---
 
 ## 16. Don't trust a ruler you haven't checked is straight

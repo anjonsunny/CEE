@@ -762,6 +762,11 @@ The per-scene instruments get summed across a batch inside compute_ground_truth_
 - **What:** An identical graph compared to itself yields zero swaps; only soft-only matches with a differing close-pair effect count.
 - **Severity:** BLOCKING. **Status:** auto.
 
+### P6 — Failure-family rollup (Meaning Generator framing in batch)
+- **What:** compute_pre_intervention_report rolls the batch's rule violations up into the five cognitive failure families via `compute_family_rollup`, producing `family_rollup`: per-family violation + scene counts, the dominant family (hallucination wins ties), and an authored batch takeaway carrying the family's meaning + decision impact (not a bare count). A clean batch yields no dominant family and a "rule-clean" takeaway. Rendered in both the markdown export and the report panel.
+- **Why:** Ports the single-run Meaning Generator's "what the breaks MEAN" framing to the corpus level, so a batch surfaces which kind of blindness dominates and what it costs, not just a per-rule tally.
+- **Severity:** BLOCKING. **Status:** auto.
+
 ### P5 — Graph B validity (β) rollup
 - **What:** compute_pre_intervention_report aggregates per-scene Graph B validity into `graph_b_validity_rollup`: median β (and B conformance validity / threats coherence), count + list of weak-β runs (β < 0.70), count of verified-GT runs with median B Test 1 accuracy, and how many runs' companion 'with Test 1' trust differs from the headline. Surfaced in both the markdown export and the report panel. Legacy runs without β are skipped (not treated as β=1).
 - **Why:** β is already inside each scene's trust score; this makes a systematically weak Graph B visible across the batch instead of hidden in the trust number.

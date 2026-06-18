@@ -165,3 +165,45 @@ def test_p5_graph_b_validity_rollup(main_module):
     md = main_module.render_report_markdown(report, [], "synthetic")
     assert "Graph B validity" in md
     assert "run_weak" in md
+
+
+# P6 — Failure-family rollup: batch rule violations carry the Meaning
+# Generator's family framing (dominant family + authored meaning/impact).
+@pytest.mark.blocking
+def test_p6_family_rollup(main_module):
+    # A scene whose Graph A breaks may_harm_hazardous_target (state_blind family):
+    # water may_harm an already-flooded (hazardous) house.
+    runs = [{
+        "image_filename": "img1.jpg",
+        "run_id": "run_001",
+        "disaster_scenario": "Yes",
+        "causal_graph": {
+            "nodes": [_node("water_1", "water", "rising", True),
+                      _node("house_1", "house", "flooded", True)],
+            "edges": [_edge("water_1", "house_1", "may_harm", "rising")],
+        },
+        "graph_b": {"nodes": [], "edges": []},
+    }]
+    report = main_module.compute_pre_intervention_report(runs)
+    fr = report["family_rollup"]
+    assert fr["dominant"] == "state_blind", fr
+    fams = {f["key"]: f for f in fr["families"]}
+    assert fams["state_blind"]["violations"] >= 1
+    assert fams["state_blind"]["scenes"] == 1
+    # Takeaway carries the authored meaning/impact, not just a count.
+    assert "misreads what an entity is" in fr["takeaway"].lower()
+    assert fams["state_blind"]["impact"] in fr["takeaway"]
+
+    md = main_module.render_report_markdown(report, [], "synthetic")
+    assert "Failure families" in md
+
+    # Clean batch → no dominant family, clean takeaway.
+    clean_runs = [{
+        "image_filename": "clean.jpg", "run_id": "run_c", "disaster_scenario": "Yes",
+        "causal_graph": {"nodes": [_node("fire_1", "fire", "burning", True)],
+                         "edges": [_edge("fire_1", "fire_1", "worsens", "burning")]},
+        "graph_b": {"nodes": [], "edges": []},
+    }]
+    fr_clean = main_module.compute_pre_intervention_report(clean_runs)["family_rollup"]
+    assert fr_clean["dominant"] is None
+    assert "rule-clean" in fr_clean["takeaway"]

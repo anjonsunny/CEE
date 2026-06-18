@@ -3782,6 +3782,65 @@ def compute_batch_rule_conformance(runs: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
+def compute_family_rollup(batch_rule_conformance: dict[str, Any]) -> dict[str, Any]:
+    """Roll the batch's rule violations up into cognitive failure families (the
+    Meaning Generator's families), so the batch report carries the same
+    'what the breaks MEAN' framing as the single-run view: which kind of
+    blindness dominates the corpus, and what it does to decisions.
+
+    Reuses the per-scene tally from compute_batch_rule_conformance — no re-run.
+    """
+    per_scene = batch_rule_conformance.get("per_scene") or []
+    n_scenes = batch_rule_conformance.get("n_scenes", len(per_scene))
+    clean_scenes = batch_rule_conformance.get("clean_scenes", 0)
+
+    fam_violations: dict[str, int] = {k: 0 for k in FAILURE_FAMILIES}
+    fam_scenes: dict[str, int] = {k: 0 for k in FAILURE_FAMILIES}
+    for s in per_scene:
+        fams_here: set[str] = set()
+        for rule, cnt in (s.get("by_rule") or {}).items():
+            fam = RULE_TO_FAMILY.get(rule, "hallucination")
+            fam_violations[fam] = fam_violations.get(fam, 0) + int(cnt)
+            fams_here.add(fam)
+        for fam in fams_here:
+            fam_scenes[fam] = fam_scenes.get(fam, 0) + 1
+
+    families: list[dict[str, Any]] = []
+    for k, spec in FAILURE_FAMILIES.items():
+        v = fam_violations.get(k, 0)
+        if v == 0:
+            continue
+        families.append({
+            "key": k,
+            "label": spec["label"],
+            "violations": v,
+            "scenes": fam_scenes.get(k, 0),
+            "meaning": spec["meaning"],
+            "impact": spec["impact"],
+        })
+    # Dominant = most violations; hallucination wins ties (fabrication is worst).
+    families.sort(key=lambda d: (-d["violations"], d["key"] != "hallucination", -d["scenes"]))
+    dominant = families[0] if families else None
+
+    if not families:
+        takeaway = (f"Across {n_scenes} scene(s) the model's graphs were rule-clean: "
+                    f"no conformance violations, so no failure family dominates.")
+    else:
+        d = dominant
+        takeaway = (
+            f"Across {n_scenes} scene(s) ({clean_scenes} clean), the dominant failure is "
+            f"\"{d['label'].lower()}\" — {d['violations']} violation(s) in {d['scenes']} scene(s). "
+            f"{d['meaning']} {d['impact']}"
+        )
+    return {
+        "families": families,
+        "dominant": dominant["key"] if dominant else None,
+        "n_scenes": n_scenes,
+        "clean_scenes": clean_scenes,
+        "takeaway": takeaway,
+    }
+
+
 def apply_inferred_block(prompt: str, allow_inferred: bool) -> str:
     """Substitute the {INFERRED_ENTITIES_BLOCK} placeholder with the relaxation
     paragraph (when allowed) or an empty string (when strict). If the placeholder
@@ -4319,6 +4378,9 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
     # Level 2 measurement (no GT needed), so it lives in the batch-native
     # report rather than only inside Test 1.
     batch_rule_conformance = compute_batch_rule_conformance(runs)
+    # Roll the rule violations up into cognitive failure families so the batch
+    # carries the Meaning Generator's "what the breaks MEAN" framing.
+    family_rollup = compute_family_rollup(batch_rule_conformance)
 
     # Graph B validity (β) rollup — the discount applied to the A-vs-B trust
     # terms, aggregated across the batch. Only runs carrying the field count;
@@ -4384,6 +4446,7 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
         "n_runs_total": n_total,
         "n_runs_non_disaster": len(non_disaster_runs),
         "batch_rule_conformance": batch_rule_conformance,
+        "family_rollup": family_rollup,
         "non_disaster_run_ids": [r.get("run_id", "?") for r in non_disaster_runs],
         "trust_distribution": trust_dist,
         "metric_distributions": metric_dists,
@@ -6100,6 +6163,24 @@ def render_report_markdown(
         else:
             lines.append("No rule violations anywhere in the batch.")
         lines.append("")
+
+    # Failure families — the Meaning Generator's "what the breaks MEAN" framing,
+    # rolled up across the batch.
+    fr = report.get("family_rollup") or {}
+    fam_list = fr.get("families") or []
+    if fr.get("takeaway"):
+        lines.append("## Failure families (what the rule breaks mean)")
+        lines.append("")
+        lines.append(fr["takeaway"])
+        lines.append("")
+        if fam_list:
+            lines.append("| Failure family | Violations | Scenes | What it reveals | Decision impact |")
+            lines.append("|---|---:|---:|---|---|")
+            for f in fam_list:
+                lines.append(
+                    f"| {f['label']} | {f['violations']} | {f['scenes']} | {f['meaning']} | {f['impact']} |"
+                )
+            lines.append("")
 
     # Graph B validity (β) rollup — how much the batch trusted Graph B as a
     # yardstick, and where it was weak.
@@ -7943,6 +8024,32 @@ def make_pre_intervention_report_panel(
             className="report-section",
         )
 
+    # Failure families — Meaning Generator framing rolled up across the batch.
+    fr = report.get("family_rollup") or {}
+    family_section = None
+    if fr.get("takeaway"):
+        fam_list = fr.get("families") or []
+        fam_rows = [
+            html.Div(
+                [
+                    html.Div(f["label"], className="metric-name"),
+                    html.Div(f"{f['violations']}", className="metric-value metric-median"),
+                    html.Div(f"{f['scenes']} scene(s)", className="metric-value metric-iqr"),
+                    html.Div(f["impact"], className="metric-value", style={"flex": "3 1 0", "textAlign": "left", "color": "#475569"}),
+                ],
+                className="metric-row",
+            )
+            for f in fam_list
+        ]
+        family_section = html.Div(
+            [
+                html.Div("Failure families — what the rule breaks mean", className="report-section-label"),
+                html.Div(fr["takeaway"], className="card-subtext", style={"marginBottom": "8px"}),
+                *(fam_rows if fam_rows else [html.Div("No conformance violations across the batch.", className="diff-empty")]),
+            ],
+            className="report-section",
+        )
+
     # Failure histogram
     fhist = report.get("failure_histogram", []) or []
     fhist_max = max((f["count"] for f in fhist), default=1)
@@ -8253,6 +8360,8 @@ def make_pre_intervention_report_panel(
         trust_section,
         metric_section,
     ])
+    if family_section is not None:
+        children.append(family_section)
     if graph_b_validity_section is not None:
         children.append(graph_b_validity_section)
     children.extend([
