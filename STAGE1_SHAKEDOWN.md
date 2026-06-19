@@ -104,6 +104,82 @@ reasoning failures.
 - **Grounded** — the target class (no clean example in this hard-scene set; expected on easier in-frame scenes).
 Recurring across modes: phantom/ungrounded people (02, 14, 37, 41), coverage propping + internal pass-ratio dilution holding trust at "moderate" (T3/T4), A-vs-B disagreement (direction in 41, over-firing in 61).
 
+**D4 — Groundedness as core-vs-spurious feature reliance (the spine of the meaning hierarchy).**
+Groundedness = how much the model's causal claims rest on CORE (causal) features
+vs SPURIOUS (correlational) ones. Two perspectives, and groundedness is the GAP
+between them:
+- **What SHOULD be core** (normative): defined by the rules + GT.
+- **What the model ACTUALLY used as core** (behavioral/mechanistic): the model's
+  own perspective.
+
+Three layers measure the same question, increasing cost + directness:
+1. **Rules = should-be-core (proxy, NOW).** The rulebook is a core-feature
+   checklist (each rule says "attend to this causal feature": target state,
+   direction, reach, mutual-hazard, provenance). A violation = the model
+   substituted a spurious correlate for a required core feature. Runs on the
+   model's own graph, **no GT** for rule-checkable features. GT/eyes still needed
+   only for the OMISSION side (a rule can't see an absent feature). **CONFIRMED:
+   use this proxy now (Sunny).**
+2. **Intervention = actually-used-core (behavioral, Stage 1 next).** CEE+'s
+   suppression pipeline is the behavioral analog of attention+intervention:
+   suppress the true core feature (put out the fire) and see if the recommendation
+   moves. No movement → the model never grounded on it (relied on spurious). The
+   pre-intervention patterns become falsifiable HYPOTHESES the intervention stage
+   tests (e.g., push_14: suppress smoke → if nothing changes, smoke was never core).
+3. **Attention / probing = mechanistic confirmation (PARKED, separate project).**
+   Sunny's prior work (attention matrices + intervention on internals). Not pulled
+   into CEE+ now; potential future arm.
+
+Per-node content model (per-section and top-level): failed test X → relied on
+spurious feature [co-occurrence/prototype/gist], missed core feature
+[state/reach/direction/caption] → ML hypothesis → consequence [decision + victim]
+→ groundedness verdict. Victim-first. Counts collapse behind the color-coded
+consequence pattern (progressive disclosure: pattern → family counts → raw
+rules/edges), inheriting the pattern's color.
+
+### D4 addendum — the bridge from static proxy to intervention verdict
+
+**(a) Wisdom-GT = should-be-core as scene-type priors, from the RESPONDER's frame.**
+Per-scene GT vanishes at deployment, but the abstract version survives: a
+knowledge base of "for a scene of THIS type, these are the core features," lifted
+from mechanics to archetypes (fire + occupants → smoke channel is core; person +
+water in distress → water-as-engulfing is core; adjacent hazards → mutual
+`worsens` is core; tanker + fire → cross-class mutual hazard is core). **The frame
+that defines "core" is the emergency-response team's decision frame** — the people
+using the prompt to act — NOT the property owner's and NOT the model's generic
+commonsense. This anchors P3: a frame/perspective mismatch is the model computing
+risk from a perspective other than the responder's, which is the one perspective
+that defines what's core. Wisdom-GT also partly covers the omission limit: a
+fire-with-occupants scene with no smoke node is flaggable as "expected core
+feature missing" from the archetype prior alone, no per-scene GT.
+
+**(b) Suppression → core/spurious (polarity).** Suppress feature V:
+- output MOVES → the model WAS grounding on V (core in the model's mind).
+- output STATIC → the model was NOT grounding on V (spurious/decorative to it,
+  whatever it claimed). This static case is rung-1 masquerade caught behaviorally:
+  named a hazard, removed it, the recommendation didn't budge. The six shift
+  signals are how "did it move" is read.
+
+**(c) The groundedness 2x2.** Rows = should-be-core (rules/wisdom, responder
+frame); columns = model-used-as-core (intervention shows output moves):
+
+| | model USED it (moves) | model did NOT use it (static) |
+|---|---|---|
+| **should be core** | Grounded ✓ | **Ungrounded** — real hazard never drove the decision (the dangerous cell; rung-1 masquerade; the omission mode, proven) |
+| **should be spurious** | **Spurious grounding** — decision hinges on a non-hazard (the push_61 over-fire, proven) | Correctly ignored ✓ |
+
+Proxy gives the rows; intervention gives the columns; the cell is the groundedness
+call. Bottom-left and top-right are the over-firing and omission failure modes,
+now provable rather than inferred.
+
+**(d) Two suppression targets, different questions.**
+1. Suppress the model's OWN chosen variable (its `suppression_pick`; selection
+   mechanism already exists) → if output is static, the model isn't consistent
+   with its own stated reasoning (the declarative-vs-mechanistic gap, behavioral).
+2. Suppress the should-be-core variable (true hazard, from proxy/wisdom) → if
+   output is static, the model isn't grounded vs reality.
+Run both: #1 catches self-inconsistency, #2 catches ungrounded-vs-truth.
+
 ## Per-run findings log
 
 ### push_02 — multi-fire cascade (runs 114032, 114845, 120750)
