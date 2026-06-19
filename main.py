@@ -3850,6 +3850,15 @@ def apply_inferred_block(prompt: str, allow_inferred: bool) -> str:
     return prompt.replace("{INFERRED_ENTITIES_BLOCK}", block)
 
 
+# Per-request read timeout (seconds) for Qwen calls. The 16k-context model on a
+# disaster image can be slow, and a COLD model load (Ollama unloads after idle —
+# common when running one scene between discussions) adds the full load time on
+# top of inference. Default 600 to survive a cold load on a heavy scene; the
+# real fix for the unload-between-scenes pattern is OLLAMA_KEEP_ALIVE=-1.
+# Override with QWEN_TIMEOUT for slower/faster hardware.
+QWEN_TIMEOUT = int(os.getenv("QWEN_TIMEOUT", "600"))
+
+
 def query_qwen(
     prompt: str, caption: str, image_contents: str | None, allow_inferred: bool = False
 ) -> dict[str, Any]:
@@ -3864,7 +3873,7 @@ def query_qwen(
         api_url,
         headers=headers,
         json=build_payload(prompt, caption, image_contents),
-        timeout=120,
+        timeout=QWEN_TIMEOUT,
     )
     response.raise_for_status()
 
@@ -4035,7 +4044,7 @@ def _run_graph_b_call(
         "response_format": {"type": "json_object"},
     }
 
-    response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+    response = requests.post(api_url, headers=headers, json=payload, timeout=QWEN_TIMEOUT)
     response.raise_for_status()
     data = response.json()
     message_content = data["choices"][0]["message"]["content"]
