@@ -843,8 +843,8 @@ Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/sha
 - **What:** Every error in `CONSEQUENCE_CATEGORY` resolves to a known `CONSEQUENCE_IMPACT` category; impacts ∈ [0,1]; the victim-cost ordering holds (missed rescue 1.0 > misrouted 0.9 > under-response 0.6 > wasted 0.3 > no-effect 0.0); unknown errors default to no_effect.
 - **Severity:** BLOCKING. **Status:** auto.
 
-### S7 — Top-level consequence verdict (T9a, meaning hierarchy tier 1)
-- **What:** `generate_consequence_verdict` scans all failures (alignment + conformance A/B), maps each to its consequence, and surfaces the WORST one victim-first with pills colored by impact (red ≥0.9, orange ≥0.5, amber ≥0.2, grey else). push_06 → Misrouted rescue (red); push_61 → Wasted response; push_14 → Slowed response (its omission is invisible to failures, → T5); clean input → green "no victim-cost failures". Rendered at the top of the trust card's left column ("Bottom line — worst consequence").
+### S7 — Meaning hierarchy: section verdicts composed into the top (T9)
+- **What:** Each SECTION gets its own worst-consequence verdict (`consequence_verdict_for`): Recommendation reasoning (alignment failures) and Rule conformance (conformance violations). The top-level verdict (`generate_consequence_verdict`) is COMPOSED from the section tops — the overall worst, named with the section it came from, plus a pill per section. Victim-first, colored by impact (red ≥0.9, orange ≥0.5, amber ≥0.2, grey else). push_06 → Misrouted rescue from Recommendation reasoning (red); push_09 → reasoning clean, worst from Rule conformance; push_14 → Slowed response (omission invisible to failures, → T5); push_61 → Wasted response; clean → green. The overall worst equals the worst across sections. Rendered at the top of the trust card's left column ("Bottom line — worst consequence").
 - **Severity:** BLOCKING. **Status:** auto.
 
 ---

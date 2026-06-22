@@ -150,3 +150,16 @@ def test_s7_consequence_verdict(main_module):
     assert main_module.consequence_color(0.6) == "orange"
     assert main_module.consequence_color(0.3) == "amber"
     assert main_module.consequence_color(0.1) == "grey"
+
+    # Bottom-up: the top is COMPOSED from per-section verdicts, not scanned flat.
+    # push_06: Recommendation-reasoning section carries the misrouted-rescue; the
+    # top names it and the section it came from.
+    assert v06["sections"]["Recommendation reasoning"]["worst_category"] == "misrouted_rescue"
+    assert "from Recommendation reasoning" in v06["takeaway"]
+    # push_09: reasoning section is clean; the worst comes from Rule conformance.
+    v09 = verdict("push_09")
+    assert v09["sections"]["Recommendation reasoning"]["worst_category"] is None
+    assert "from Rule conformance" in v09["takeaway"]
+    # The overall worst equals the worst across sections.
+    worst_section_impact = max(s["worst_impact"] for s in v06["sections"].values())
+    assert abs(v06["worst_impact"] - worst_section_impact) < 1e-9

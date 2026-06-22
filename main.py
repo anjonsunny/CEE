@@ -3796,39 +3796,63 @@ def consequence_color(impact: float) -> str:
     return "red" if impact >= 0.9 else "orange" if impact >= 0.5 else "amber" if impact >= 0.2 else "grey"
 
 
-def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: dict[str, Any]) -> dict[str, Any]:
-    """T9a — top-level meaning hierarchy verdict. Scans every failure (alignment
-    + conformance A/B), maps each to its downstream consequence (the T3 model),
-    and surfaces the WORST consequence present, victim-first, with pills per
-    consequence category (color by impact)."""
-    errs = [str(f.get("type", "")) for f in (alignment.get("failures", []) or [])]
-    errs += [str(v.get("rule", "")) for v in (rule_conformance.get("violations", []) or [])]
-
+def consequence_verdict_for(errors: list[str]) -> dict[str, Any]:
+    """One SECTION's verdict: map its errors to consequences (T3 model) and
+    surface that section's worst, with pills per consequence category."""
     counts: dict[str, int] = {}
-    for e in errs:
-        cat = CONSEQUENCE_CATEGORY.get(e, "no_effect")
+    for e in errors:
+        cat = CONSEQUENCE_CATEGORY.get(str(e), "no_effect")
         if cat == "no_effect":
             continue
         counts[cat] = counts.get(cat, 0) + 1
-
     if not counts:
-        return {
-            "takeaway": "No victim-relevant failures — the causal account is clean enough to act on.",
-            "pills": [{"label": "No victim-cost failures", "count": 0, "color": "green",
-                       "tooltip": "No failure carries a downstream decision or victim consequence."}],
-            "worst_category": None, "worst_impact": 0.0,
-        }
-
+        return {"worst_category": None, "worst_impact": 0.0, "takeaway": "Clean.",
+                "pills": [{"label": "Clean", "count": 0, "color": "green", "tooltip": "No victim-cost failure."}]}
     ordered = sorted(counts, key=lambda c: -CONSEQUENCE_IMPACT[c])
     worst = ordered[0]
-    takeaway = f"Worst consequence: {CONSEQUENCE_LABEL[worst]}. {CONSEQUENCE_HEADLINE[worst]}"
+    takeaway = f"{CONSEQUENCE_LABEL[worst]}. {CONSEQUENCE_HEADLINE[worst]}"
     if len(ordered) > 1:
-        takeaway += " Also present: " + ", ".join(CONSEQUENCE_LABEL[c].lower() for c in ordered[1:]) + "."
+        takeaway += " Also: " + ", ".join(CONSEQUENCE_LABEL[c].lower() for c in ordered[1:]) + "."
     pills = [{"label": CONSEQUENCE_LABEL[c], "count": counts[c],
               "color": consequence_color(CONSEQUENCE_IMPACT[c]), "tooltip": CONSEQUENCE_HEADLINE[c]}
              for c in ordered]
+    return {"worst_category": worst, "worst_impact": CONSEQUENCE_IMPACT[worst],
+            "takeaway": takeaway, "pills": pills}
+
+
+def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: dict[str, Any]) -> dict[str, Any]:
+    """The meaning hierarchy. Each SECTION gets its own worst-consequence verdict
+    (tier 2); the top-level verdict (tier 1) is COMPOSED from the section tops —
+    the overall worst, named with the section it came from, plus a pill per
+    section. Victim-first, color by impact, rule-based (T9)."""
+    sections = {
+        "Recommendation reasoning": consequence_verdict_for(
+            [str(f.get("type", "")) for f in (alignment.get("failures", []) or [])]),
+        "Rule conformance": consequence_verdict_for(
+            [str(v.get("rule", "")) for v in (rule_conformance.get("violations", []) or [])]),
+    }
+
+    scored = [(name, v) for name, v in sections.items() if v["worst_category"]]
+    if not scored:
+        return {
+            "takeaway": "No victim-relevant failures — the causal account is clean enough to act on.",
+            "pills": [{"label": "No victim-cost failures", "count": 0, "color": "green",
+                       "tooltip": "No section carries a downstream decision or victim consequence."}],
+            "worst_category": None, "worst_impact": 0.0, "sections": sections,
+        }
+
+    scored.sort(key=lambda nv: -nv[1]["worst_impact"])
+    worst_section, worst_v = scored[0]
+    worst = worst_v["worst_category"]
+    takeaway = (f"Worst across the scene: {CONSEQUENCE_LABEL[worst]} (from {worst_section}). "
+                f"{CONSEQUENCE_HEADLINE[worst]}")
+    # one pill per section, showing that section's worst consequence (the combination).
+    pills = [{"label": f"{name}: {CONSEQUENCE_LABEL[v['worst_category']]}",
+              "count": sum(p["count"] for p in v["pills"]),
+              "color": consequence_color(v["worst_impact"]),
+              "tooltip": v["takeaway"]} for name, v in scored]
     return {"takeaway": takeaway, "pills": pills,
-            "worst_category": worst, "worst_impact": CONSEQUENCE_IMPACT[worst]}
+            "worst_category": worst, "worst_impact": worst_v["worst_impact"], "sections": sections}
 
 
 def generate_conformance_meaning(rule_conformance: dict[str, Any]) -> dict[str, Any]:
