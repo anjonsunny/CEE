@@ -118,3 +118,35 @@ def test_s6_consequence_model_integrity(main_module):
     assert main_module.consequence_score("merge_rule_violation") == 0.0                       # no effect
     # unknown error defaults to no_effect
     assert main_module.consequence_score("not_a_real_error") == 0.0
+
+
+@pytest.mark.blocking
+def test_s7_consequence_verdict(main_module):
+    """T9a — top-level verdict surfaces the WORST consequence, victim-first."""
+    runs = _load()
+
+    def verdict(scene):
+        sr = runs[scene]
+        return main_module.generate_consequence_verdict(
+            sr.get("pre_internal_alignment", {}), sr.get("rule_conformance", {}))
+
+    # push_06: a victim treated as a threat → Misrouted rescue, red.
+    v06 = verdict("push_06")
+    assert v06["worst_category"] == "misrouted_rescue"
+    assert v06["pills"][0]["color"] == "red"
+    assert "Misrouted rescue" in v06["takeaway"]
+    # push_61: fabricated hazards on a safe scene → Wasted response (over-firing).
+    assert verdict("push_61")["worst_category"] == "wasted_response"
+    # push_14: only cosmetic failures → Slowed response (the omission is invisible here, → T5).
+    assert verdict("push_14")["worst_category"] == "slowed_response"
+
+    # Clean input → green "no victim-cost failures".
+    clean = main_module.generate_consequence_verdict({"failures": []}, {"violations": []})
+    assert clean["worst_category"] is None
+    assert clean["pills"][0]["color"] == "green"
+
+    # Color thresholds.
+    assert main_module.consequence_color(1.0) == "red"
+    assert main_module.consequence_color(0.6) == "orange"
+    assert main_module.consequence_color(0.3) == "amber"
+    assert main_module.consequence_color(0.1) == "grey"

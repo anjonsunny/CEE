@@ -843,6 +843,10 @@ Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/sha
 - **What:** Every error in `CONSEQUENCE_CATEGORY` resolves to a known `CONSEQUENCE_IMPACT` category; impacts ∈ [0,1]; the victim-cost ordering holds (missed rescue 1.0 > misrouted 0.9 > under-response 0.6 > wasted 0.3 > no-effect 0.0); unknown errors default to no_effect.
 - **Severity:** BLOCKING. **Status:** auto.
 
+### S7 — Top-level consequence verdict (T9a, meaning hierarchy tier 1)
+- **What:** `generate_consequence_verdict` scans all failures (alignment + conformance A/B), maps each to its consequence, and surfaces the WORST one victim-first with pills colored by impact (red ≥0.9, orange ≥0.5, amber ≥0.2, grey else). push_06 → Misrouted rescue (red); push_61 → Wasted response; push_14 → Slowed response (its omission is invisible to failures, → T5); clean input → green "no victim-cost failures". Rendered at the top of the trust card's left column ("Bottom line — worst consequence").
+- **Severity:** BLOCKING. **Status:** auto.
+
 ---
 
 ## How to use this spec

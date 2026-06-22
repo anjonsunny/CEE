@@ -3776,6 +3776,61 @@ def consequence_score(error: str) -> float:
     return CONSEQUENCE_IMPACT.get(CONSEQUENCE_CATEGORY.get(error, "no_effect"), 0.0)
 
 
+CONSEQUENCE_LABEL = {
+    "missed_rescue": "Missed rescue",
+    "misrouted_rescue": "Misrouted rescue",
+    "under_response": "Under-response",
+    "wasted_response": "Wasted response",
+    "slowed_response": "Slowed response",
+}
+CONSEQUENCE_HEADLINE = {
+    "missed_rescue": "A person in danger would get no help.",
+    "misrouted_rescue": "Response would be aimed the wrong way — a victim treated as a threat, or an action targeting nothing.",
+    "under_response": "A real danger is softened or dropped — too little, too late.",
+    "wasted_response": "Effort would be spent on a non-threat — false alarm, alert fatigue.",
+    "slowed_response": "The brief is overloaded or garbled — slower action.",
+}
+
+
+def consequence_color(impact: float) -> str:
+    return "red" if impact >= 0.9 else "orange" if impact >= 0.5 else "amber" if impact >= 0.2 else "grey"
+
+
+def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: dict[str, Any]) -> dict[str, Any]:
+    """T9a — top-level meaning hierarchy verdict. Scans every failure (alignment
+    + conformance A/B), maps each to its downstream consequence (the T3 model),
+    and surfaces the WORST consequence present, victim-first, with pills per
+    consequence category (color by impact)."""
+    errs = [str(f.get("type", "")) for f in (alignment.get("failures", []) or [])]
+    errs += [str(v.get("rule", "")) for v in (rule_conformance.get("violations", []) or [])]
+
+    counts: dict[str, int] = {}
+    for e in errs:
+        cat = CONSEQUENCE_CATEGORY.get(e, "no_effect")
+        if cat == "no_effect":
+            continue
+        counts[cat] = counts.get(cat, 0) + 1
+
+    if not counts:
+        return {
+            "takeaway": "No victim-relevant failures — the causal account is clean enough to act on.",
+            "pills": [{"label": "No victim-cost failures", "count": 0, "color": "green",
+                       "tooltip": "No failure carries a downstream decision or victim consequence."}],
+            "worst_category": None, "worst_impact": 0.0,
+        }
+
+    ordered = sorted(counts, key=lambda c: -CONSEQUENCE_IMPACT[c])
+    worst = ordered[0]
+    takeaway = f"Worst consequence: {CONSEQUENCE_LABEL[worst]}. {CONSEQUENCE_HEADLINE[worst]}"
+    if len(ordered) > 1:
+        takeaway += " Also present: " + ", ".join(CONSEQUENCE_LABEL[c].lower() for c in ordered[1:]) + "."
+    pills = [{"label": CONSEQUENCE_LABEL[c], "count": counts[c],
+              "color": consequence_color(CONSEQUENCE_IMPACT[c]), "tooltip": CONSEQUENCE_HEADLINE[c]}
+             for c in ordered]
+    return {"takeaway": takeaway, "pills": pills,
+            "worst_category": worst, "worst_impact": CONSEQUENCE_IMPACT[worst]}
+
+
 def generate_conformance_meaning(rule_conformance: dict[str, Any]) -> dict[str, Any]:
     """The Meaning Generator from Failure, conformance section.
 
@@ -8816,7 +8871,8 @@ def make_graph_b_trust_panel(
     )
 
 
-def make_pre_intervention_trust_panel(trust: dict[str, Any]) -> html.Div:
+def make_pre_intervention_trust_panel(trust: dict[str, Any],
+                                      consequence_verdict: dict[str, Any] | None = None) -> html.Div:
     """Render baseline trust summary with explicit breakdown and meaning.
 
     Layout:
@@ -9154,6 +9210,13 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any]) -> html.Div:
                 ],
                 className="trust-summary-card",
             ),
+            (html.Div(
+                [
+                    html.Div("Bottom line — worst consequence", className="trust-section-label"),
+                    *render_meaning_header(consequence_verdict),
+                ],
+                className="trust-verdict-block",
+            ) if consequence_verdict else html.Div()),
             html.Div(
                 [
                     html.Div("Why this score", className="trust-section-label"),
@@ -9639,7 +9702,7 @@ def render_meaning_header(meaning: dict[str, Any]) -> list:
     if not meaning:
         return []
     pills = []
-    color_map = {"green": "pill-ok", "amber": "pill-warn", "red": "pill-bad", "grey": "pill-neutral"}
+    color_map = {"green": "pill-ok", "amber": "pill-warn", "orange": "pill-orange", "red": "pill-bad", "grey": "pill-neutral"}
     for p in meaning.get("pills", []):
         tip = p.get("tooltip", "")
         # CSS hover popup: a hidden child shown on :hover (immediate, styled,
@@ -10797,8 +10860,10 @@ app.index_string = """<!DOCTYPE html>
             }
             .pill-ok { background: #dcfce7; color: #166534; }
             .pill-warn { background: #fef9c3; color: #854d0e; }
+            .pill-orange { background: #ffedd5; color: #9a3412; }
             .pill-bad { background: #fee2e2; color: #991b1b; }
             .pill-neutral { background: #e2e8f0; color: #475569; }
+            .trust-verdict-block { margin: 8px 0; padding: 8px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
             .pill-tip {
                 display: none;
                 position: absolute;
@@ -13161,7 +13226,10 @@ def render_results(
     conformance_meaning = render_meaning_header(generate_conformance_meaning(normalized.get("rule_conformance", {})))
     pathology_meaning = render_meaning_header(generate_pathology_meaning(normalized.get("pathologies", {})))
     accuracy_meaning = render_meaning_header(generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
-    pre_trust_view = make_pre_intervention_trust_panel(normalized["pre_intervention_trust"])
+    consequence_verdict = generate_consequence_verdict(
+        normalized.get("pre_internal_alignment", {}), normalized.get("rule_conformance", {}))
+    pre_trust_view = make_pre_intervention_trust_panel(
+        normalized["pre_intervention_trust"], consequence_verdict=consequence_verdict)
     graph_b_trust_view = make_graph_b_trust_panel(
         normalized["pre_intervention_trust"],
         rule_conformance=normalized.get("rule_conformance", {}),
