@@ -254,6 +254,23 @@ pattern → section verdicts → counts → raw rules/edges on expand.
 **Dropped from the list:** T12 (CJK leak), T6 (duplicate edges) — weak link to
 trust or groundedness.
 
+**D5 — Consequence verification in the intervention (Layer 2), across suppression depths (Sunny).**
+The consequence model (T3's `CONSEQUENCE_CATEGORY`/`CONSEQUENCE_IMPACT`) is not just
+a pre-intervention score — it is a VERIFICATION TARGET in the intervention. The
+groundedness matrix asks "does the output move when you suppress?"; this adds "does
+it move to the RIGHT consequence?" After an edge-severance (pull the drowning child
+out), a grounded model's consequence must shift Missed-rescue → resolved; if the
+victim still reads in danger, the model didn't update the consequence → ungrounded.
+So add a **consequence-shift signal** to the six (did the predicted victim/decision
+consequence change as the cascade + wisdom-GT predict). Same consequence vocabulary,
+two layers: scored statically (T3 trust), verified dynamically (intervention).
+Across the depth axis: **single** (Stage 1) verify one consequence-shift; **multi**
+(Stage 2) compare consequence-shifts across competing suppressions → the true driver
+is the one that most reduces the WORST consequence (victim cost, not hazard
+magnitude); **progressive** (Stage 3) verify the consequence updates at every chained
+step. Sunny's three standing priorities: (1) weight failures by victim consequence,
+(2) hierarchical failure-pattern + consequences, (3) core vs spurious.
+
 ## Per-run findings log
 
 ### push_02 — multi-fire cascade (runs 114032, 114845, 120750)
