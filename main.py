@@ -8920,6 +8920,35 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any],
     qualifiers = trust.get("qualifiers", []) or []
     components = trust.get("components", {}) or {}
 
+    # Meaning hierarchy (T9): the top verdict, then each section's verdict below
+    # (the composition). Rendered between the score and the breakdown.
+    verdict_block = html.Div()
+    if consequence_verdict:
+        section_rows = []
+        for name, sv in (consequence_verdict.get("sections", {}) or {}).items():
+            if sv.get("worst_category"):
+                section_rows.append(html.Div(
+                    [html.Div(name, className="trust-verdict-subname"), *render_meaning_header(sv)],
+                    className="trust-verdict-section",
+                ))
+            else:
+                section_rows.append(html.Div(
+                    [html.Div(name, className="trust-verdict-subname"),
+                     html.Span("Clean", className="meaning-pill pill-ok")],
+                    className="trust-verdict-section",
+                ))
+        verdict_block = html.Div(
+            [
+                html.Div("Bottom line — worst consequence", className="trust-section-label"),
+                *render_meaning_header(consequence_verdict),
+                html.Details(
+                    [html.Summary("By section"), *section_rows],
+                    className="trust-verdict-sections",
+                ) if section_rows else html.Div(),
+            ],
+            className="trust-verdict-block",
+        )
+
     # Score breakdown — show each weighted contribution to the total.
     internal = float(components.get("internal_alignment", 0.0) or 0.0)
     a_fid = float(components.get("a_fidelity", 0.0) or 0.0)
@@ -9234,13 +9263,7 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any],
                 ],
                 className="trust-summary-card",
             ),
-            (html.Div(
-                [
-                    html.Div("Bottom line — worst consequence", className="trust-section-label"),
-                    *render_meaning_header(consequence_verdict),
-                ],
-                className="trust-verdict-block",
-            ) if consequence_verdict else html.Div()),
+            verdict_block,
             html.Div(
                 [
                     html.Div("Why this score", className="trust-section-label"),
@@ -10888,6 +10911,9 @@ app.index_string = """<!DOCTYPE html>
             .pill-bad { background: #fee2e2; color: #991b1b; }
             .pill-neutral { background: #e2e8f0; color: #475569; }
             .trust-verdict-block { margin: 8px 0; padding: 8px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
+            .trust-verdict-sections > summary { cursor: pointer; font-size: 11px; font-weight: 600; color: #64748b; margin-top: 6px; }
+            .trust-verdict-section { margin: 6px 0 0 8px; padding-left: 6px; border-left: 2px solid #e2e8f0; }
+            .trust-verdict-subname { font-size: 11px; font-weight: 700; color: #475569; }
             .pill-tip {
                 display: none;
                 position: absolute;

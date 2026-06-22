@@ -163,3 +163,30 @@ def test_s7_consequence_verdict(main_module):
     # The overall worst equals the worst across sections.
     worst_section_impact = max(s["worst_impact"] for s in v06["sections"].values())
     assert abs(v06["worst_impact"] - worst_section_impact) < 1e-9
+
+
+@pytest.mark.blocking
+def test_s8_verdict_renders_in_trust_card(main_module):
+    """T9 — the trust panel renders the top verdict + the per-section breakdown."""
+    sr = _load()["push_06"]
+    v = main_module.generate_consequence_verdict(
+        sr.get("pre_internal_alignment", {}), sr.get("rule_conformance", {}))
+    panel = main_module.make_pre_intervention_trust_panel(
+        sr["pre_intervention_trust"], consequence_verdict=v)
+
+    def text(n, acc):
+        ch = getattr(n, "children", None)
+        if isinstance(ch, str):
+            acc.append(ch)
+        elif isinstance(ch, (list, tuple)):
+            for c in ch:
+                text(c, acc)
+        elif ch is not None:
+            text(ch, acc)
+        return acc
+
+    blob = " ".join(text(panel, []))
+    assert "Bottom line" in blob          # tier-1 header
+    assert "By section" in blob           # tier-2 disclosure
+    assert "Recommendation reasoning" in blob
+    assert "Misrouted" in blob
