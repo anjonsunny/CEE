@@ -85,3 +85,36 @@ def test_s4_phase1_targets(main_module):
     # push_61: fabricated hazards on a safe scene → already drops to "low" under T1/T4.
     p61 = _recompute(main_module, runs["push_61"])
     assert p61["level"] == "low", f"push_61 {p61['level']}"
+
+
+@pytest.mark.blocking
+def test_s5_consequence_weighting(main_module):
+    """T3 — internal is capped by the consequence-weighted penalty, so a
+    high-consequence failure tanks it and cosmetic-only failures don't."""
+    runs = _load()
+    # push_06: a victim treated as a threat = Misrouted rescue (0.9) → out of high, hard drop.
+    p06 = _recompute(main_module, runs["push_06"])
+    assert p06["level"] != "high" and p06["score"] < 0.5, f"push_06 {p06['score']:.2f}"
+    types = {f.get("type") for f in runs["push_06"]["pre_internal_alignment"].get("failures", [])}
+    assert "at_risk_entity_used_as_threat" in types
+    # push_14: only cosmetic alignment failures → consequence cap does NOT bite → stays high.
+    assert _recompute(main_module, runs["push_14"])["level"] == "high"
+    # push_09: no consequence-bearing alignment failures → moderate (unchanged).
+    assert _recompute(main_module, runs["push_09"])["level"] == "moderate"
+
+
+@pytest.mark.blocking
+def test_s6_consequence_model_integrity(main_module):
+    """Every mapped error resolves to a known impact; key orderings hold."""
+    for err, cat in main_module.CONSEQUENCE_CATEGORY.items():
+        assert cat in main_module.CONSEQUENCE_IMPACT, f"{err} -> {cat} not an impact category"
+    for cat, imp in main_module.CONSEQUENCE_IMPACT.items():
+        assert 0.0 <= imp <= 1.0
+    # spot-check the victim-cost ordering
+    assert main_module.consequence_score("at_risk_state_missing_from_at_risk_block") == 1.0  # missed rescue
+    assert main_module.consequence_score("at_risk_entity_used_as_threat") == 0.9              # misrouted
+    assert main_module.consequence_score("may_harm_hazardous_target") == 0.6                  # under-response
+    assert main_module.consequence_score("normal_state_listed_as_at_risk") == 0.3            # wasted
+    assert main_module.consequence_score("merge_rule_violation") == 0.0                       # no effect
+    # unknown error defaults to no_effect
+    assert main_module.consequence_score("not_a_real_error") == 0.0

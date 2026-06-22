@@ -834,6 +834,15 @@ Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/sha
 - **Why:** Locks the Phase-1 wins to the real runs and pins what the spine should NOT touch (push_14), so later phases are attributable.
 - **Severity:** BLOCKING. **Status:** auto.
 
+### S5 — Consequence weighting (T3)
+- **What:** Internal alignment is capped by a consequence-weighted penalty — each alignment failure scored by the downstream emergency-response consequence it would cause (`error → entity → consequence → impact`). push_06 drops hard because a drowning victim is treated as a threat (Misrouted rescue, 0.9); push_14 (cosmetic-only alignment failures) stays "high"; push_09 (no consequence-bearing alignment failures) stays "moderate". The cap can only LOWER the pass-ratio, never raise it (monotone with S2).
+- **Why:** Failures must count by victim cost, not by head-count — fixes the pass-ratio dilution that let push_06's role inversion read "high".
+- **Severity:** BLOCKING. **Status:** auto.
+
+### S6 — Consequence model integrity
+- **What:** Every error in `CONSEQUENCE_CATEGORY` resolves to a known `CONSEQUENCE_IMPACT` category; impacts ∈ [0,1]; the victim-cost ordering holds (missed rescue 1.0 > misrouted 0.9 > under-response 0.6 > wasted 0.3 > no-effect 0.0); unknown errors default to no_effect.
+- **Severity:** BLOCKING. **Status:** auto.
+
 ---
 
 ## How to use this spec

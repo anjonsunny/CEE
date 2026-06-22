@@ -3028,7 +3028,20 @@ def assess_pre_intervention_trust(
             "score_formula": "n/a",
         }
 
-    internal = float(alignment.get("score", 0.0) or 0.0)
+    # T3 — consequence weighting. The flat pass-ratio dilutes a few real failures
+    # among many vacuous passes. Cap the internal score by a consequence-weighted
+    # penalty: high-consequence failures (a victim dropped, a victim treated as a
+    # threat) pull it down hard; cosmetic ones barely move it. The cap can only
+    # LOWER the pass-ratio (never raise it), so cosmetic-only scenes are unchanged.
+    internal_passratio = float(alignment.get("score", 0.0) or 0.0)
+    align_consequence = sum(
+        consequence_score(str(f.get("type", "")))
+        for f in (alignment.get("failures", []) or [])
+    )
+    # Penalty floored at 0.9 (internal floor 0.1) so a fully-fabricated scene lands
+    # a graded "low", not a literal 0.00.
+    internal_consequence = 1.0 - min(0.9, align_consequence / CONSEQUENCE_SATURATION)
+    internal = min(internal_passratio, internal_consequence)
     topological = float(consistency.get("topological_consistency", 0.0) or 0.0)
     node_consistency = float(consistency.get("node_consistency", 0.0) or 0.0)
     flag_consistency = float(consistency.get("flag_consistency", 0.0) or 0.0)
@@ -3685,6 +3698,82 @@ FAILURE_FAMILIES: dict[str, dict[str, Any]] = {
 RULE_TO_FAMILY: dict[str, str] = {
     rule: fam for fam, spec in FAILURE_FAMILIES.items() for rule in spec["rules"]
 }
+
+# ---------------------------------------------------------------------------
+# Consequence model (T3): error -> affected entity -> consequence -> impact.
+# Each error (alignment failure type OR conformance rule) is scored by the
+# downstream emergency-response consequence it would cause, victim-first. This
+# is what trust weights by, instead of head-counting failures. See
+# STAGE1_SHAKEDOWN.md (T3 / the consequence categories).
+# ---------------------------------------------------------------------------
+CONSEQUENCE_IMPACT = {  # category -> impact score
+    "missed_rescue": 1.0,     # a person in danger gets no help (victim dropped)
+    "misrouted_rescue": 0.9,  # rescue aimed wrong / a victim treated as a threat
+    "under_response": 0.6,    # real danger softened or dropped -> too little, too late
+    "wasted_response": 0.3,   # effort on a non-threat -> fatigue, dilution
+    "slowed_response": 0.1,   # overloaded / unreadable brief -> delay
+    "no_effect": 0.0,         # bookkeeping only, no decision change
+}
+
+# error -> consequence category. Errors absent from this map default to no_effect.
+CONSEQUENCE_CATEGORY: dict[str, str] = {
+    # --- Missed rescue (victim dropped) ---
+    "smoke_superset_violation": "missed_rescue",
+    "at_risk_state_missing_from_at_risk_block": "missed_rescue",
+    # --- Misrouted rescue (victim mis-roled / action targets a victim wrongly) ---
+    "at_risk_entity_used_as_threat": "misrouted_rescue",
+    "at_risk_entity_also_in_threats": "misrouted_rescue",
+    "hazardous_and_at_risk": "misrouted_rescue",
+    "distress_state_on_non_living": "misrouted_rescue",
+    # --- Under-response (hazard softened/dropped/mislabeled; broken action) ---
+    "hazard_state_missing_from_threats": "under_response",
+    "fluid_wrong_effect_for_person": "under_response",
+    "may_harm_hazardous_target": "under_response",
+    "spread_between_hazards": "under_response",
+    "one_way_worsens": "under_response",
+    "hazardous_node_no_edges": "under_response",
+    "hazard_flag_state_mismatch": "under_response",
+    "unresolved_affected_object": "under_response",
+    "unresolved_endpoint": "under_response",
+    "invalid_graph_edge": "under_response",
+    # --- Wasted response (fabricated hazard/victim; over-firing) ---
+    "edge_from_non_hazardous": "wasted_response",
+    "normal_state_listed_as_threat": "wasted_response",
+    "uncoupled_obstruction": "wasted_response",
+    "at_risk_missing_detected_object": "wasted_response",
+    "normal_state_listed_as_at_risk": "wasted_response",
+    "at_risk_state_not_at_risk_bearing": "wasted_response",
+    "at_risk_entity_unreached": "wasted_response",
+    "recommendation_threat_not_declared": "wasted_response",
+    "recommendation_state_mismatch": "wasted_response",
+    "threat_state_mismatch": "wasted_response",
+    "threat_state_not_hazard_bearing": "wasted_response",
+    # --- Slowed response (operator overload / garbled output) ---
+    "redundant_instancing": "slowed_response",
+    "node_budget_exceeded": "slowed_response",
+    "effect_not_in_vocabulary": "slowed_response",
+    "out_of_vocabulary_state": "slowed_response",
+    "self_loop_not_worsens": "slowed_response",
+    "invalid_effect_label": "slowed_response",
+    "invalid_self_loop_effect": "slowed_response",
+    "via_state_not_hazard_bearing": "slowed_response",
+    "via_state_mismatch": "slowed_response",
+    # --- No effect (cosmetic / bookkeeping) ---
+    "redundant_self_loop": "no_effect",
+    "merge_rule_violation": "no_effect",
+    "quad_ids_missing_from_reason": "no_effect",
+    "quad_ids_missing_from_related_object_ids": "no_effect",
+    "related_object_missing_detected_object": "no_effect",
+    "remaining_risk_object_missing_detected_object": "no_effect",
+    "remaining_risk_state_mismatch": "no_effect",
+}
+
+CONSEQUENCE_SATURATION = 2.0  # Σ impact at which the internal penalty saturates
+
+
+def consequence_score(error: str) -> float:
+    """Impact score (0..1) of one error, via its consequence category."""
+    return CONSEQUENCE_IMPACT.get(CONSEQUENCE_CATEGORY.get(error, "no_effect"), 0.0)
 
 
 def generate_conformance_meaning(rule_conformance: dict[str, Any]) -> dict[str, Any]:
