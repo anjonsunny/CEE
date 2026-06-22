@@ -190,3 +190,27 @@ def test_s8_verdict_renders_in_trust_card(main_module):
     assert "By section" in blob           # tier-2 disclosure
     assert "Recommendation reasoning" in blob
     assert "Misrouted" in blob
+
+
+@pytest.mark.blocking
+def test_s9_context_used_missed(main_module):
+    """T16/T9 — caption↔output: the model's use of the authoritative caption is
+    surfaced as the 3rd element of the verdict (context used/missed)."""
+    runs = _load()
+    # push_06: caption says "drowning" (water) but the model modeled no water hazard.
+    sr = runs["push_06"]
+    cap = json.load(open(str(FIXDIR / "shakedown_push_06_run_20260618T125106.json")))["caption"]
+    v = main_module.generate_consequence_verdict(
+        sr.get("pre_internal_alignment", {}), sr.get("rule_conformance", {}),
+        caption=cap, threats=sr.get("threats", []), at_risk_objects=sr.get("at_risk_objects", []))
+    assert "water hazard" in v["context"]["missed"]
+    assert "victim(s)" in v["context"]["used"]
+    assert any("Caption ignored" in p["label"] for p in v["pills"])
+    assert "Context missed" in v["takeaway"]
+
+    # Direct: caption hazard present in threats → used, not missed.
+    used = main_module.analyze_caption_use(
+        "house on fire", [{"object_id": "house_1", "label": "house", "state": "burning"}], [])
+    assert "fire hazard" in used["used"] and not used["missed"]
+    # Empty caption → nothing.
+    assert main_module.analyze_caption_use("", [], []) == {"used": [], "missed": []}

@@ -3796,6 +3796,49 @@ def consequence_color(impact: float) -> str:
     return "red" if impact >= 0.9 else "orange" if impact >= 0.5 else "amber" if impact >= 0.2 else "grey"
 
 
+# Caption keyword → what the scene should contain. Used to detect whether the
+# model USED the authoritative caption or ignored it (T16, context used/missed).
+# Just parses the input caption (not an LLM interpreting our measurements).
+CAPTION_HAZARD_CUES = {
+    "fire": ["fire", "burning", "blaze", "flames", "flame"],
+    "water": ["drowning", "flood", "flooded", "submerged", "water", "surge", "overflow"],
+    "smoke": ["smoke", "smoky"],
+    "collapse": ["collapse", "collapsed", "rubble", "earthquake", "debris"],
+    "explosion": ["explosion", "explode", "blast", "exploded"],
+    "leak": ["leak", "leaking", "spill", "spilling", "chemical"],
+}
+CAPTION_VICTIM_CUES = ["drowning", "injured", "casualt", "trapped", "wounded",
+                       "unconscious", "victim", "hurt", "stranded", "suffocat"]
+
+
+def analyze_caption_use(caption: str, threats: list[dict[str, Any]],
+                        at_risk_objects: list[dict[str, Any]]) -> dict[str, Any]:
+    """Did the model use the authoritative caption, or ignore it? Returns
+    {used: [...], missed: [...]} comparing caption cues to the model's output."""
+    cap = (caption or "").lower()
+    used: list[str] = []
+    missed: list[str] = []
+    if not cap.strip():
+        return {"used": used, "missed": missed}
+
+    threat_blob = " ".join(
+        f"{t.get('object_id','')} {t.get('label','')} {t.get('state','')}" for t in (threats or [])
+    ).lower()
+    for hazard, cues in CAPTION_HAZARD_CUES.items():
+        if any(c in cap for c in cues):
+            # caption names this hazard — is it in the threats block?
+            present = (hazard in threat_blob) or any(c in threat_blob for c in cues)
+            (used if present else missed).append(f"{hazard} hazard")
+
+    # Victim cue in caption but no at-risk entity declared → missed.
+    if any(c in cap for c in CAPTION_VICTIM_CUES):
+        if at_risk_objects:
+            used.append("victim(s)")
+        else:
+            missed.append("victim(s) named in caption")
+    return {"used": used, "missed": missed}
+
+
 def consequence_verdict_for(errors: list[str]) -> dict[str, Any]:
     """One SECTION's verdict: map its errors to consequences (T3 model) and
     surface that section's worst, with pills per consequence category."""
@@ -3820,39 +3863,58 @@ def consequence_verdict_for(errors: list[str]) -> dict[str, Any]:
             "takeaway": takeaway, "pills": pills}
 
 
-def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: dict[str, Any]) -> dict[str, Any]:
+def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: dict[str, Any],
+                                 caption: str = "", threats: list[dict[str, Any]] | None = None,
+                                 at_risk_objects: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """The meaning hierarchy. Each SECTION gets its own worst-consequence verdict
     (tier 2); the top-level verdict (tier 1) is COMPOSED from the section tops —
     the overall worst, named with the section it came from, plus a pill per
-    section. Victim-first, color by impact, rule-based (T9)."""
+    section. Carries context used/missed (caption vs output). Victim-first,
+    color by impact, rule-based (T9)."""
     sections = {
         "Recommendation reasoning": consequence_verdict_for(
             [str(f.get("type", "")) for f in (alignment.get("failures", []) or [])]),
         "Rule conformance": consequence_verdict_for(
             [str(v.get("rule", "")) for v in (rule_conformance.get("violations", []) or [])]),
     }
+    context = analyze_caption_use(caption, threats or [], at_risk_objects or [])
+    # context used/missed pills (the 3rd element of every hierarchy node).
+    ctx_pills: list[dict[str, Any]] = []
+    ctx_takeaway = ""
+    if context["missed"]:
+        ctx_pills.append({"label": "Caption ignored: " + ", ".join(context["missed"]),
+                          "count": 0, "color": "red",
+                          "tooltip": "The caption names these but the model's output does not reflect them."})
+        ctx_takeaway = " Context missed: " + ", ".join(context["missed"]) + " (named in the caption, not modeled)."
+    if context["used"]:
+        ctx_pills.append({"label": "Caption used: " + ", ".join(context["used"]),
+                          "count": 0, "color": "green",
+                          "tooltip": "The model's output reflects these caption cues."})
 
     scored = [(name, v) for name, v in sections.items() if v["worst_category"]]
     if not scored:
         return {
-            "takeaway": "No victim-relevant failures — the causal account is clean enough to act on.",
-            "pills": [{"label": "No victim-cost failures", "count": 0, "color": "green",
-                       "tooltip": "No section carries a downstream decision or victim consequence."}],
-            "worst_category": None, "worst_impact": 0.0, "sections": sections,
+            "takeaway": ("No victim-relevant failures — the causal account is clean enough to act on."
+                         + ctx_takeaway),
+            "pills": ([{"label": "No victim-cost failures", "count": 0, "color": "green",
+                        "tooltip": "No section carries a downstream decision or victim consequence."}]
+                      + ctx_pills),
+            "worst_category": None, "worst_impact": 0.0, "sections": sections, "context": context,
         }
 
     scored.sort(key=lambda nv: -nv[1]["worst_impact"])
     worst_section, worst_v = scored[0]
     worst = worst_v["worst_category"]
     takeaway = (f"Worst across the scene: {CONSEQUENCE_LABEL[worst]} (from {worst_section}). "
-                f"{CONSEQUENCE_HEADLINE[worst]}")
+                f"{CONSEQUENCE_HEADLINE[worst]}" + ctx_takeaway)
     # one pill per section, showing that section's worst consequence (the combination).
     pills = [{"label": f"{name}: {CONSEQUENCE_LABEL[v['worst_category']]}",
               "count": sum(p["count"] for p in v["pills"]),
               "color": consequence_color(v["worst_impact"]),
-              "tooltip": v["takeaway"]} for name, v in scored]
+              "tooltip": v["takeaway"]} for name, v in scored] + ctx_pills
     return {"takeaway": takeaway, "pills": pills,
-            "worst_category": worst, "worst_impact": worst_v["worst_impact"], "sections": sections}
+            "worst_category": worst, "worst_impact": worst_v["worst_impact"],
+            "sections": sections, "context": context}
 
 
 def generate_conformance_meaning(rule_conformance: dict[str, Any]) -> dict[str, Any]:
@@ -13165,6 +13227,7 @@ def analyze_scene(
         result["run_id"] = datetime.now().strftime("run_%Y%m%dT%H%M%S")
         result["image_filename"] = safe_filename(image_filename)
         result["allow_inferred"] = allow_inferred
+        result["caption"] = caption or ""  # carried for caption↔output context check (T16)
 
         # Prompt 2: Graph B (independent VLM-generated causal graph).
         # Strict isolation: only detected_objects + threats are passed back, NOT recommendations.
@@ -13277,7 +13340,10 @@ def render_results(
     pathology_meaning = render_meaning_header(generate_pathology_meaning(normalized.get("pathologies", {})))
     accuracy_meaning = render_meaning_header(generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
     consequence_verdict = generate_consequence_verdict(
-        normalized.get("pre_internal_alignment", {}), normalized.get("rule_conformance", {}))
+        normalized.get("pre_internal_alignment", {}), normalized.get("rule_conformance", {}),
+        caption=str(normalized.get("caption", "")),
+        threats=normalized.get("threats", []),
+        at_risk_objects=normalized.get("at_risk_objects", []))
     pre_trust_view = make_pre_intervention_trust_panel(
         normalized["pre_intervention_trust"], consequence_verdict=consequence_verdict)
     graph_b_trust_view = make_graph_b_trust_panel(
