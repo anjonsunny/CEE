@@ -214,3 +214,67 @@ def test_s9_context_used_missed(main_module):
     assert "fire hazard" in used["used"] and not used["missed"]
     # Empty caption → nothing.
     assert main_module.analyze_caption_use("", [], []) == {"used": [], "missed": []}
+
+
+@pytest.mark.blocking
+def test_s10_consequence_coverage_no_silent_zero(main_module):
+    """Sweep regression-lock: every failure type/rule the system can emit must be
+    mapped in CONSEQUENCE_CATEGORY, or it silently scores 0 impact (invisible to
+    the trust cap AND the meaning hierarchy). This caught 5 unmapped types."""
+    m = main_module
+    cc = set(m.CONSEQUENCE_CATEGORY)
+    # curated rule enumerations must all be mapped
+    for name, mp in (("FAILURE_SEVERITY", m.FAILURE_SEVERITY),
+                     ("FAILURE_CATEGORY", m.FAILURE_CATEGORY),
+                     ("RULE_TO_FAMILY", m.RULE_TO_FAMILY)):
+        missing = set(mp) - cc
+        assert not missing, f"{name} keys unmapped in CONSEQUENCE_CATEGORY (silent 0): {sorted(missing)}"
+    # the two alignment maps must enumerate the SAME failure types
+    sym = set(m.FAILURE_SEVERITY) ^ set(m.FAILURE_CATEGORY)
+    assert not sym, f"FAILURE_SEVERITY vs FAILURE_CATEGORY disagree: {sorted(sym)}"
+    # every type/rule that actually fires in the 9 captured runs must be mapped,
+    # both for consequence (trust/hierarchy) AND for the batch-report breakdown
+    # (else it buckets to "other"/"mid" and skews grounding%/severity).
+    align_seen, conf_seen = set(), set()
+    for sr in _load().values():
+        align_seen |= {f.get("type") for f in sr.get("pre_internal_alignment", {}).get("failures", [])}
+        conf_seen |= {v.get("rule") for v in sr.get("rule_conformance", {}).get("violations", [])}
+    align_seen.discard(None)
+    conf_seen.discard(None)
+    assert (align_seen | conf_seen) <= cc, f"live types unmapped in consequence: {sorted((align_seen | conf_seen) - cc)}"
+    assert align_seen <= set(m.FAILURE_CATEGORY), f"alignment types uncategorized: {sorted(align_seen - set(m.FAILURE_CATEGORY))}"
+    assert conf_seen <= set(m.RULE_TO_FAMILY), f"conformance rules without family: {sorted(conf_seen - set(m.RULE_TO_FAMILY))}"
+    # every category resolves to a valid impact
+    assert set(m.CONSEQUENCE_CATEGORY.values()) <= set(m.CONSEQUENCE_IMPACT)
+
+
+@pytest.mark.blocking
+def test_s11_spurious_grounding_both_sources(main_module):
+    """Core/spurious: the 'spurious used' signal is split across alignment
+    failures (at-risk/threat-state rules) AND conformance violations (graph-edge
+    rules), so detect_spurious_grounding must scan BOTH."""
+    m = main_module
+    align = {"failures": [{"type": "normal_state_listed_as_at_risk", "detail": "child_1"}]}
+    conf = {"violations": [{"rule": "edge_from_non_hazardous", "detail": "a->b"}]}
+    sp = m.detect_spurious_grounding(align, conf)
+    assert len(sp) == 2, f"expected one spurious from each source, got {sp}"
+    # every spurious rule must mean wasted_response (the audited false-positive family)
+    for r in m.SPURIOUS_GROUNDING_RULES:
+        assert m.CONSEQUENCE_CATEGORY.get(r) == "wasted_response", r
+
+    # push_61: benign park, model invented at-risk → spurious dominated by the
+    # at-risk-state alignment rules (NOT just the lucky graph edge it used to catch).
+    sr = _load()["push_61"]
+    v = m.generate_consequence_verdict(
+        sr["pre_internal_alignment"], sr["rule_conformance"],
+        caption="A park", threats=sr.get("threats", []), at_risk_objects=sr.get("at_risk_objects", []))
+    assert v["context"]["spurious"], "push_61 must surface spurious grounding"
+    assert any("at_risk" in s or "normal_state" in s for s in v["context"]["spurious"])
+    assert any("Spurious grounding" in p["label"] for p in v["pills"])
+    # push_02 (houses on fire, grounded) → no spurious grounding.
+    sr2 = _load()["push_02"]
+    v2 = m.generate_consequence_verdict(
+        sr2["pre_internal_alignment"], sr2["rule_conformance"],
+        caption="Houses are on fire", threats=sr2.get("threats", []),
+        at_risk_objects=sr2.get("at_risk_objects", []))
+    assert not v2["context"]["spurious"]

@@ -843,6 +843,16 @@ Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/sha
 - **What:** Every error in `CONSEQUENCE_CATEGORY` resolves to a known `CONSEQUENCE_IMPACT` category; impacts ∈ [0,1]; the victim-cost ordering holds (missed rescue 1.0 > misrouted 0.9 > under-response 0.6 > wasted 0.3 > no-effect 0.0); unknown errors default to no_effect.
 - **Severity:** BLOCKING. **Status:** auto.
 
+### S10 — Consequence coverage (no silent zero) [sweep regression-lock]
+- **What:** Every failure type/rule the system can emit must be mapped in CONSEQUENCE_CATEGORY (else it silently scores 0 impact, invisible to the trust cap AND the meaning hierarchy). Locks: all FAILURE_SEVERITY / FAILURE_CATEGORY / RULE_TO_FAMILY keys are in CONSEQUENCE_CATEGORY; FAILURE_SEVERITY and FAILURE_CATEGORY enumerate the same types; every type/rule fired in the 9 runs is mapped in consequence AND categorized for the batch report (alignment→FAILURE_CATEGORY, conformance→RULE_TO_FAMILY), so nothing buckets to "other"/"mid"; all categories resolve to a valid impact.
+- **Why:** The sweep found 5 emitted types unmapped in CONSEQUENCE_CATEGORY (silent 0), invalid_graph_edge missing from FAILURE_SEVERITY, and 11 alignment types missing from the batch-report maps (skewing grounding%/severity). This test prevents recurrence.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### S11 — Spurious grounding (core/spurious, both sources)
+- **What:** The "spurious used" signal is split across alignment failures (at-risk/threat-state rules) and conformance violations (graph-edge rules), so `detect_spurious_grounding` scans BOTH. Locks: one spurious from each source counts; every SPURIOUS_GROUNDING_RULE means wasted_response; push_61 (benign park, invented at-risk) surfaces spurious dominated by the at-risk-state alignment rules and a red "Spurious grounding" pill; push_02 (grounded fire) surfaces none.
+- **Why:** The sweep found `detect_spurious_grounding` originally read only `rule_conformance`, so it caught push_61 by luck (a graph edge) and missed the real at-risk-state spurious signals that live in alignment.
+- **Severity:** BLOCKING. **Status:** auto.
+
 ### S8 — Meaning hierarchy renders in the trust card
 - **What:** `make_pre_intervention_trust_panel` renders the top verdict ("Bottom line — worst consequence") plus a collapsible "By section" tier-2 breakdown (each section's own verdict).
 - **Severity:** BLOCKING. **Status:** auto.

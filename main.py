@@ -3736,6 +3736,8 @@ CONSEQUENCE_CATEGORY: dict[str, str] = {
     "unresolved_affected_object": "under_response",
     "unresolved_endpoint": "under_response",
     "invalid_graph_edge": "under_response",
+    "latent_active_conflict": "under_response",     # active hazard read as latent -> delayed handling
+    "threat_missing_detected_object": "under_response",  # hazard ref dangles -> can't be acted on
     # --- Wasted response (fabricated hazard/victim; over-firing) ---
     "edge_from_non_hazardous": "wasted_response",
     "normal_state_listed_as_threat": "wasted_response",
@@ -3758,14 +3760,17 @@ CONSEQUENCE_CATEGORY: dict[str, str] = {
     "invalid_self_loop_effect": "slowed_response",
     "via_state_not_hazard_bearing": "slowed_response",
     "via_state_mismatch": "slowed_response",
+    "duplicate_recommendation_quad": "slowed_response",  # same action twice -> padded brief
     # --- No effect (cosmetic / bookkeeping) ---
     "redundant_self_loop": "no_effect",
     "merge_rule_violation": "no_effect",
     "quad_ids_missing_from_reason": "no_effect",
     "quad_ids_missing_from_related_object_ids": "no_effect",
+    "reason_ids_missing_from_links": "no_effect",
     "related_object_missing_detected_object": "no_effect",
     "remaining_risk_object_missing_detected_object": "no_effect",
     "remaining_risk_state_mismatch": "no_effect",
+    "duplicate_remaining_risk": "no_effect",
 }
 
 CONSEQUENCE_SATURATION = 2.0  # Σ impact at which the internal penalty saturates
@@ -3839,6 +3844,39 @@ def analyze_caption_use(caption: str, threats: list[dict[str, Any]],
     return {"used": used, "missed": missed}
 
 
+# Spurious grounding = the model leaned on a feature that is NOT a grounded
+# hazard/victim: a benign-state entity flagged as a threat, an at-risk entity no
+# hazard reaches, an edge from a non-hazardous source. These are exactly the
+# conformance rules whose consequence is wasted_response (effort on a non-threat),
+# so we derive spurious from the audited checker rather than re-deriving it.
+SPURIOUS_GROUNDING_RULES = {
+    "normal_state_listed_as_threat",
+    "normal_state_listed_as_at_risk",
+    "at_risk_state_not_at_risk_bearing",
+    "threat_state_not_hazard_bearing",
+    "at_risk_entity_unreached",
+    "edge_from_non_hazardous",
+    "uncoupled_obstruction",
+}
+
+
+def detect_spurious_grounding(alignment: dict[str, Any],
+                              rule_conformance: dict[str, Any]) -> list[str]:
+    """The 'spurious used' side of core/spurious: declared threats/at-risk that
+    aren't grounded in a real hazard. These signals are split across two
+    sources — the at-risk/threat-state rules are alignment failures, the
+    graph-edge rules are conformance violations — so scan BOTH. All map to
+    wasted_response (the audited spurious/false-positive family)."""
+    out: list[str] = []
+    for f in (alignment.get("failures", []) or []):
+        if str(f.get("type", "")) in SPURIOUS_GROUNDING_RULES:
+            out.append(str(f.get("detail") or f.get("type")))
+    for v in (rule_conformance.get("violations", []) or []):
+        if str(v.get("rule", "")) in SPURIOUS_GROUNDING_RULES:
+            out.append(str(v.get("detail") or v.get("rule")))
+    return out
+
+
 def consequence_verdict_for(errors: list[str]) -> dict[str, Any]:
     """One SECTION's verdict: map its errors to consequences (T3 model) and
     surface that section's worst, with pills per consequence category."""
@@ -3878,14 +3916,24 @@ def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: di
             [str(v.get("rule", "")) for v in (rule_conformance.get("violations", []) or [])]),
     }
     context = analyze_caption_use(caption, threats or [], at_risk_objects or [])
-    # context used/missed pills (the 3rd element of every hierarchy node).
+    context["spurious"] = detect_spurious_grounding(alignment or {}, rule_conformance or {})
+    # context used / missed / spurious pills (the 3rd element of every node):
+    #   missed core  = ungrounded by omission, spurious = ungrounded by invention.
     ctx_pills: list[dict[str, Any]] = []
     ctx_takeaway = ""
     if context["missed"]:
         ctx_pills.append({"label": "Caption ignored: " + ", ".join(context["missed"]),
                           "count": 0, "color": "red",
                           "tooltip": "The caption names these but the model's output does not reflect them."})
-        ctx_takeaway = " Context missed: " + ", ".join(context["missed"]) + " (named in the caption, not modeled)."
+        ctx_takeaway += " Context missed: " + ", ".join(context["missed"]) + " (named in the caption, not modeled)."
+    if context["spurious"]:
+        ctx_pills.append({"label": "Spurious grounding", "count": len(context["spurious"]),
+                          "color": "red",
+                          "tooltip": "Relied on features that are not grounded in a real hazard "
+                                     "(threats/at-risk with no hazard behind them): "
+                                     + "; ".join(context["spurious"][:4])})
+        ctx_takeaway += (f" Spurious grounding: {len(context['spurious'])} declared "
+                         "threat/at-risk with no real hazard behind them.")
     if context["used"]:
         ctx_pills.append({"label": "Caption used: " + ", ".join(context["used"]),
                           "count": 0, "color": "green",
@@ -5671,6 +5719,9 @@ FAILURE_SEVERITY = {
     "related_object_missing_detected_object": "high",
     "latent_active_conflict": "high",
     "invalid_self_loop_effect": "high",
+    "invalid_graph_edge": "high",
+    "at_risk_missing_detected_object": "high",
+    "remaining_risk_object_missing_detected_object": "high",
     # MID — consistency: graph stands but contradicts itself
     "hazard_state_missing_from_threats": "mid",
     "normal_state_listed_as_threat": "mid",
@@ -5680,9 +5731,18 @@ FAILURE_SEVERITY = {
     "quad_ids_missing_from_reason": "mid",
     "reason_ids_missing_from_links": "mid",
     "quad_ids_missing_from_related_object_ids": "mid",
+    "at_risk_entity_also_in_threats": "mid",
+    "at_risk_entity_used_as_threat": "mid",
+    "at_risk_state_not_at_risk_bearing": "mid",
+    "normal_state_listed_as_at_risk": "mid",
+    "out_of_vocabulary_state": "mid",
+    "remaining_risk_state_mismatch": "mid",
+    "at_risk_entity_unreached": "mid",
+    "at_risk_state_missing_from_at_risk_block": "mid",
     # LOW — duplication: cosmetic redundancy, model padded output
     "duplicate_recommendation_quad": "low",
     "duplicate_remaining_risk": "low",
+    "merge_rule_violation": "low",
 }
 
 
@@ -6017,19 +6077,30 @@ FAILURE_CATEGORY = {
     "threat_missing_detected_object": "grounding",
     "invalid_effect_label": "grounding",
     "latent_active_conflict": "grounding",
+    "at_risk_missing_detected_object": "grounding",
+    "remaining_risk_object_missing_detected_object": "grounding",
     # state consistency (mid)
     "hazard_state_missing_from_threats": "state",
     "normal_state_listed_as_threat": "state",
     "threat_state_mismatch": "state",
     "recommendation_state_mismatch": "state",
     "threat_state_not_hazard_bearing": "state",
+    "at_risk_entity_also_in_threats": "state",
+    "at_risk_entity_used_as_threat": "state",
+    "at_risk_state_not_at_risk_bearing": "state",
+    "normal_state_listed_as_at_risk": "state",
+    "out_of_vocabulary_state": "state",
+    "remaining_risk_state_mismatch": "state",
     # coverage (mid)
     "quad_ids_missing_from_reason": "coverage",
     "reason_ids_missing_from_links": "coverage",
     "quad_ids_missing_from_related_object_ids": "coverage",
+    "at_risk_entity_unreached": "coverage",
+    "at_risk_state_missing_from_at_risk_block": "coverage",
     # duplication (low)
     "duplicate_recommendation_quad": "duplication",
     "duplicate_remaining_risk": "duplication",
+    "merge_rule_violation": "duplication",
     # self-loop (high)
     "invalid_self_loop_effect": "self_loop",
 }
