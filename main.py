@@ -3068,22 +3068,44 @@ def assess_pre_intervention_trust(
         (conf_validity + threats_coh + test1_acc) / 3.0 if test1_acc >= 0 else beta_deploy
     )
 
+    # T1 — Graph A's own structural validity (mirror of Graph B). A malformed
+    # recommendation graph should not get full internal-coherence credit, so it
+    # scales the Internal term. a_conformance_validity = 1.0 when A is rule-clean.
+    a_edges_list = graph_a.get("edges") or []
+    a_violations = check_graph_rule_conformance(graph_a or {}, "graph_a")
+    # Floored at 0.5 (Sunny): even a fully-broken A scales Internal by 0.5, not 0,
+    # so trust lands as a graded "low" rather than a literal 0.00. A scales the
+    # dominant Internal term, so its penalty is floored; B's beta (which only
+    # reweights the agreement block) stays unfloored.
+    a_conformance_validity = 1.0 - 0.5 * min(1.0, len(a_violations) / max(1, len(a_edges_list)))
+    internal_eff = internal * a_conformance_validity
+
+    # T4 — coverage is vacuous on a near-empty graph (full coverage of ~nothing).
+    # Exclude it and fold its 0.20 weight into Internal when Graph A has <=1
+    # hazardous node or <=1 edge.
+    a_haz_count = sum(
+        1 for n in (graph_a.get("nodes") or [])
+        if n.get("hazardous") or canonicalize_state(str(n.get("state", "")).strip()) in HAZARD_BEARING_STATES
+    )
+    coverage_excluded = (a_haz_count <= 1) or (len(a_edges_list) <= 1)
+
     w_agree = 0.40  # nominal weight of the agreement block (0.20 A-fid + 0.20 B-cov)
 
     def _trust_score(b: float) -> float:
-        w_int = 0.40 + (1.0 - b) * w_agree
-        return (w_int * internal) + (b * 0.20 * a_fidelity) + (b * 0.20 * b_edge_coverage) + (0.20 * coverage)
+        w_int = 0.40 + (1.0 - b) * w_agree + (0.20 if coverage_excluded else 0.0)
+        cov_term = 0.0 if coverage_excluded else (0.20 * coverage)
+        return (w_int * internal_eff) + (b * 0.20 * a_fidelity) + (b * 0.20 * b_edge_coverage) + cov_term
 
     # Headline = deployment-honest (no answer-key leak).
     beta = beta_deploy
-    w_internal = 0.40 + (1.0 - beta) * w_agree
+    w_internal = 0.40 + (1.0 - beta) * w_agree + (0.20 if coverage_excluded else 0.0)
     score = _trust_score(beta_deploy)
     score_with_test1 = _trust_score(beta_verified)
     score_formula = (
-        "(0.40 + (1-beta)*0.40)*Internal + beta*0.20*A fidelity (strict) "
-        "+ beta*0.20*B edge coverage (strict) + 0.20*Avg(Graph A/B threat coverage); "
-        "headline beta = mean(B conformance validity, B-vs-threats coherence); "
-        "companion 'with Test 1' beta also folds in B's accuracy vs verified GT"
+        "w_int*(Internal * A-conformance-validity) + beta*0.20*A fidelity + beta*0.20*B edge coverage "
+        "+ (0.20*Coverage, unless near-empty → folded into w_int); "
+        "w_int = 0.40 + (1-beta)*0.40 + (0.20 if coverage excluded); "
+        "beta = mean(B conformance validity, B-vs-threats coherence)"
     )
     qualifiers: list[str] = []
 
@@ -3219,6 +3241,9 @@ def assess_pre_intervention_trust(
             "score_with_test1": score_with_test1,
             "effective_internal_weight": w_internal,
             "effective_agreement_weight": beta * w_agree,
+            "a_conformance_validity": a_conformance_validity,  # T1
+            "internal_effective": internal_eff,                # T1: internal * a_conformance_validity
+            "coverage_excluded": coverage_excluded,            # T4
         },
         "score_formula": score_formula,
     }
@@ -8744,6 +8769,10 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any]) -> html.Div:
     beta = float(components.get("b_validity_beta", 1.0) or 0.0)
     w_internal = float(components.get("effective_internal_weight", 0.40) or 0.0)
     w_each = float(components.get("effective_agreement_weight", beta * 0.40) or 0.0) / 2.0
+    # T1/T4 fields (older stored results lack them → no-op defaults).
+    internal_eff = float(components.get("internal_effective", internal))
+    a_conf_validity = float(components.get("a_conformance_validity", 1.0) or 0.0)
+    coverage_excluded = bool(components.get("coverage_excluded", False))
 
     def main_row(name: str, value: float, weight: float, rationale: str) -> html.Div:
         return html.Div(
@@ -8779,15 +8808,52 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any]) -> html.Div:
             className="breakdown-row breakdown-soft-row",
         )
 
-    internal_rationale = "Layer 2 contract checks (most fundamental)."
+    internal_rationale = "Layer 2 contract checks, scaled by Graph A's structural validity."
     if beta < 0.999:
         internal_rationale += " Weight raised to absorb the discount on the A-vs-B block."
-    breakdown_rows = [main_row("Internal alignment", internal, w_internal, internal_rationale)]
+    if coverage_excluded:
+        internal_rationale += " Near-empty coverage folded in here."
+    breakdown_rows = [main_row("Internal alignment", internal_eff, w_internal, internal_rationale)]
+    if a_conf_validity < 0.999:
+        breakdown_rows.append(html.Div(
+            [
+                html.Div("↪ Graph A conformance validity", className="breakdown-name breakdown-soft-name"),
+                html.Div(f"{a_conf_validity:.2f}", className="breakdown-value"),
+                html.Div("", className="breakdown-times"),
+                html.Div("", className="breakdown-weight"),
+                html.Div("", className="breakdown-equals"),
+                html.Div(f"×{a_conf_validity:.2f}", className="breakdown-contribution breakdown-soft-gap"),
+                html.Div(
+                    f"Graph A's own rule violations scaled the Internal value down from {internal:.2f} "
+                    f"(penalty floored at 0.5).",
+                    className="breakdown-rationale breakdown-soft-rationale",
+                ),
+            ],
+            className="breakdown-row breakdown-soft-row",
+        ))
     breakdown_rows.append(main_row("A-fidelity (strict)", a_fid, w_each, "Recs grounded in model's own beliefs (weighted by Graph B validity)."))
     breakdown_rows.append(soft_row("A-fidelity", a_fid_soft, gap_a))
     breakdown_rows.append(main_row("B-coverage (strict)", b_cov, w_each, "Recs cover what model believes (weighted by Graph B validity)."))
     breakdown_rows.append(soft_row("B-coverage", b_cov_soft, gap_b))
-    breakdown_rows.append(main_row("Threat coverage (avg)", cov_avg, 0.20, "Declared threats produce edges."))
+    if coverage_excluded:
+        breakdown_rows.append(html.Div(
+            [
+                html.Div("↪ Threat coverage excluded", className="breakdown-name breakdown-soft-name"),
+                html.Div("n/a", className="breakdown-value"),
+                html.Div("", className="breakdown-times"),
+                html.Div("", className="breakdown-weight"),
+                html.Div("", className="breakdown-equals"),
+                html.Div("", className="breakdown-contribution"),
+                html.Div(
+                    "Near-empty graph (≤1 hazardous node or ≤1 edge): full coverage of ~nothing is "
+                    "vacuous, so its 0.20 weight folded into Internal above.",
+                    className="breakdown-rationale breakdown-soft-rationale",
+                ),
+            ],
+            className="breakdown-row breakdown-soft-row",
+        ))
+    else:
+        breakdown_rows.append(main_row("Threat coverage (avg)", cov_avg, 0.20, "Declared threats produce edges."))
 
     # When Graph B is a weak yardstick (β < 1) the agreement weights above are
     # below 0.20. We only POINT to where β comes from; the actual Graph B
@@ -8859,10 +8925,10 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any]) -> html.Div:
     # the soft tier on A/B. Always shown so the soft version is visible even when
     # it equals strict (delta +0.000 = no effect-label vocabulary divergence).
     soft_score = (
-        w_internal * internal
+        w_internal * internal_eff
         + w_each * a_fid_soft
         + w_each * b_cov_soft
-        + 0.20 * cov_avg
+        + (0.0 if coverage_excluded else 0.20 * cov_avg)
     )
     soft_score_delta = max(0.0, soft_score - score)
     show_soft_total = True

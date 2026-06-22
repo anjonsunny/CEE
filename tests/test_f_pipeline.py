@@ -75,10 +75,15 @@ def test_f4_trust_b_validity_discount(main_module):
         "topological_consistency": 0.90, "structural_consistency": 0.90,
         "node_consistency": 1.0, "flag_consistency": 1.0,
     }
-    # Graph A has an edge (avoids the no-threats short-circuit) and full coverage.
+    # Graph A: two burning houses with mutual worsens — rule-clean and NOT
+    # near-empty (≥2 hazardous nodes, ≥2 edges), so this stays a pure β test:
+    # T1 leaves Internal unscaled (a_conformance_validity = 1) and T4 keeps the
+    # coverage term. T1/T4 behavior is covered in Section S.
     graph_a = {
-        "nodes": [{"id": "house_1", "label": "house", "state": "burning", "hazardous": True}],
-        "edges": [{"source": "house_1", "target": "house_1", "effect": "worsens", "via_state": "burning"}],
+        "nodes": [{"id": "house_1", "label": "house", "state": "burning", "hazardous": True},
+                  {"id": "house_2", "label": "house", "state": "burning", "hazardous": True}],
+        "edges": [{"source": "house_1", "target": "house_2", "effect": "worsens", "via_state": "burning"},
+                  {"source": "house_2", "target": "house_1", "effect": "worsens", "via_state": "burning"}],
         "threat_reasoning_coverage": 1.0,
     }
 

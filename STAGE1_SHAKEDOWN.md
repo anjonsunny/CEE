@@ -23,10 +23,10 @@ deferred to-do (T1–T15) and design directions (D1–D3) below as the spec.
 
 | id | change | why | evidence (scene · run) | status |
 |---|---|---|---|---|
-| T1 | Graph A conformance feeds the trust score | Today only Graph B's conformance reaches trust (via β). Graph A had 3 structural violations (`via_state_not_hazard_bearing`, `edge_from_non_hazardous`, `self_loop_not_worsens`) completely invisible to the score. A's structural soundness should count. | push_06 · run_20260618T125106 | CONFIRMED (Sunny) |
+| T1 | Graph A conformance feeds the trust score | Today only Graph B's conformance reaches trust (via β). Graph A had 3 structural violations (`via_state_not_hazard_bearing`, `edge_from_non_hazardous`, `self_loop_not_worsens`) completely invisible to the score. A's structural soundness should count. | push_06 · run_20260618T125106 | **DONE (Phase 1a)** — `a_conformance_validity = 1 − 0.5·min(1, viol/edges)` (floored 0.5) scales the Internal term. push_06 0.86 high → 0.41 low. Tests S3/S4. |
 | T2 | Gate the trust band on high-consequence failures | Some failures are high-consequence (lethal omission, role inversion), not nits. Any one should cap trust below "high" regardless of the pass-ratio. push_06 had role inversion + invalid self-loop and still scored 0.86 "high". Use the D2 consequence ladder for "which failures gate". | push_06 · run_20260618T125106 | CONFIRMED (Sunny) |
 | T3 | Weight failures by downstream consequence (not flat count, not abstract severity) | Internal alignment is a flat `passed/total` ratio; 4 genuine failures diluted by 19 vacuous passes → 0.83. Replace head-counting with consequence weighting per D2 (scale by each failure/family's authored decision `impact`). Extend the same weighting to conformance→β and the band's a_fidelity gate (push_09: effect-label-only disagreements should not ding as hard as structural ones). | push_06 · run_20260618T125106; push_09 · run_20260618T140020 | CONFIRMED (Sunny) |
-| T4 | Coverage must not reward under-modeling | `graph_a/b_coverage` = 1.0 on a near-empty graph (no orphan threats only because almost no threats were declared). Modeling *less* raised the score. Exclude/n-a coverage when a scene has ~no threats/edges. | push_06 · run_20260618T125106 | CANDIDATE (raised, not yet confirmed) |
+| T4 | Coverage must not reward under-modeling | `graph_a/b_coverage` = 1.0 on a near-empty graph (no orphan threats only because almost no threats were declared). Modeling *less* raised the score. Exclude/n-a coverage when a scene has ~no threats/edges. | push_06 · run_20260618T125106 | **DONE (Phase 1a)** — coverage excluded + its 0.20 weight folded into Internal when ≤1 hazardous node or ≤1 edge. Tests S4. |
 | T5 | Surface the trust↔Test 1 divergence as a first-class signal | Structurally clean, internally coherent, plausible enough that a careful human did not alarm — yet mechanistically wrong (heat over-extended, smoke channel absent), Test 1 = 0.14. No internal measure (conformance, alignment, β) can catch a plausible-but-wrong rung-1 answer; only Test 1 does. So a high-trust / low-Test-1 scene must be flagged loudly wherever a GT exists. (Optional, harder: a structural prior like "burning structure near people but no smoke node" to hint at the gap when no GT exists — but do not auto-treat a coarser graph as wrong; precision distinguishes wrong-mechanism from mere coarseness.) | push_14 · run_20260618T123612 | CANDIDATE (raised push_14) |
 | T6 | Duplicate edges in a graph | Graph A listed `house_1 --may_harm--> person_1` twice (`merge_rule_violation`, soft). Decide whether a literal duplicate edge is a harder signal / conformance rule. | push_14 · run_20260618T123612 | CANDIDATE (raised push_14) |
 | T7 | Run-to-run variance at temperature 0 | Same image ran 3x → 3 different graphs and trust from "high" to 0.57 "low". Single-run trust is unstable. Decide methodology: report median-over-N-runs, and/or quantify variance per scene (ties to test K9). Not a bug fix; a measurement-design decision. | push_02 · runs 114032, 114845, 120750 | CANDIDATE (raised push_02) |
@@ -160,17 +160,27 @@ feature missing" from the archetype prior alone, no per-scene GT.
   named a hazard, removed it, the recommendation didn't budge. The six shift
   signals are how "did it move" is read.
 
-**(c) The groundedness 2x2.** Rows = should-be-core (rules/wisdom, responder
-frame); columns = model-used-as-core (intervention shows output moves):
+**(c) The groundedness CONTINGENCY MATRIX (the core artifact — 2D, cells = output + meaning).**
+Two axes:
+- **ROW = should-be-core** (per context, from rules / wisdom-GT / responder frame):
+  is this variable a true driver (CORE) or not (SPURIOUS).
+- **COLUMN = the model's behavior when you act on the variable** (suppress via the
+  right intervention type → does the output MOVE = grounded on it, or stay STATIC =
+  not grounded). Read from the six shift signals.
+Each cell = the suppression OUTPUT and what it MEANS for groundedness.
 
-| | model USED it (moves) | model did NOT use it (static) |
+| | suppress → **MOVES** (grounded on it) | suppress → **STATIC** (not grounded) |
 |---|---|---|
-| **should be core** | Grounded ✓ | **Ungrounded** — real hazard never drove the decision (the dangerous cell; rung-1 masquerade; the omission mode, proven) |
-| **should be spurious** | **Spurious grounding** — decision hinges on a non-hazard (the push_61 over-fire, proven) | Correctly ignored ✓ |
+| **should be CORE** (true driver) | **Grounded** — decision anchored to the real driver | **Ungrounded / masquerade** — the real hazard never drove the decision (the dangerous cell; rung-1; push_14 / push_06) |
+| **should be SPURIOUS** (not core) | **Spurious grounding / over-firing** — decision hinges on the wrong thing (push_61) | **Correctly ignored** — rightly didn't depend on it |
 
-Proxy gives the rows; intervention gives the columns; the cell is the groundedness
-call. Bottom-left and top-right are the over-firing and omission failure modes,
-now provable rather than inferred.
+Row comes from the proxy (context). Column comes from the intervention. Cell = the
+groundedness call. **C_model** (the model's own `suppression_pick`) selects WHICH
+variable a run tests; **C_should** (truth, from context) sets the ROW. The two
+suppression targets (suppress the model's pick / suppress the should-be-core pick)
+are how you populate the matrix; each "act on it" is one of the intervention types
+(source_removal / edge_severance / target_mitigation, L2). Recorded permanently in
+memory file `project-groundedness-matrix`.
 
 **(d) Two suppression targets, different questions.**
 1. Suppress the model's OWN chosen variable (its `suppression_pick`; selection
@@ -179,6 +189,70 @@ now provable rather than inferred.
 2. Suppress the should-be-core variable (true hazard, from proxy/wisdom) → if
    output is static, the model isn't grounded vs reality.
 Run both: #1 catches self-inconsistency, #2 catches ungrounded-vs-truth.
+
+### D4 addendum 2 — context detection/verification + the two-layer split + UI
+
+**Two layers, two questions (clarified — Sunny):**
+- **Layer 1 (pre-intervention, what we've built):** "How much can we TRUST the
+  model's baseline account?" The trust score is the *reliability* of the baseline
+  and whether it's clean enough to run a counterfactual on. NOT causal
+  groundedness. (assess_pre_intervention_trust's own docstring: "trustworthy
+  enough to interpret intervention shifts cleanly.")
+- **Layer 2 (intervention/counterfactual, Stage 1 next):** "Is the reasoning
+  causally GROUNDED?" Suppress a hazard, see if the output updates. The six shift
+  signals. This is where groundedness is measured.
+- **Bridge:** the pre-intervention mechanistic checks (conformance, Test 1) are a
+  STATIC, PARTIAL groundedness *hint* (a rule violation = pattern-matched-not-
+  looked); the failure patterns become *hypotheses* the intervention tests. The
+  verdict is the intervention's, not the pre-intervention score's.
+- **T9 correction:** T9 is FAILURE-PATTERN finding (per-section → top-level), it
+  is NOT a groundedness verdict and does not compute core/spurious. core/spurious
+  + the 2x2 belong to Layer 2.
+
+**How the intervention works + how it uses context (Layer 2, see TESTS.md L-series).**
+The suppression VARIABLE comes from the CAUSAL GRAPH (L1; `pick_suppression_framework`
++ the model's `suppression_pick`), NOT from context. The intervention TYPE is the
+shape of the do() — a REALISTIC response action that breaks/modifies a causal edge,
+never deleting an object from image/text:
+- **source_removal** — neutralize the hazard at its source (extinguish the fire):
+  outgoing edges vanish; Proximity-via-that-edge targets → safe.
+- **edge_severance** — break the harm edge, source stays (responders pull the
+  drowning child out): that edge removed; child `drowning` → `recovering`; water
+  remains a hazard.
+- **target_mitigation** — protect the target, edge + source stay (oxygen mask):
+  target improves (`suffocating` → `recovering`).
+Type matches hazard class (L2). The do() implies an EXPECTED counterfactual graph
+via the cascade rules (L4); **context (wisdom-GT + responder frame) + the cascade
+rules define that expected result = the correct answer.** Loop: apply do() → model
+produces its actual post-intervention output → compare to expected via the six
+shift signals (L5). Matches → grounded; no/wrong update → not grounded. Validity
+backbone: L6 (suppressing an irrelevant hazard barely moves things), L7 (a rung-1
+mock that never updates must score LOW). So context supplies the EXPECTED ANSWER;
+the graph supplies the variable; the type supplies the realistic do().
+
+**How we DETECT which context the model used vs missed.** Same question as
+core/spurious, two regimes:
+- **Pre-intervention (proxy, static): consistency between context and output.**
+  Caption: light-parse the caption for hazard/victim facts and check the graph
+  reflects them (caption "drowning", model "swimming" → caption not used; just
+  parsing the input, not an LLM interpreting measurements). Entities/threats:
+  recs/graph reference detected entities consistently (coverage rules). Rule
+  core-features: a conformance violation tied to a core feature IS "that feature
+  not used." Mismatch = context element missed (suggestive, not definitive).
+- **Post-intervention (definitive, behavioral):** suppress the context element,
+  see if the output moves. Moves = used; static = missed. Same machinery as the
+  groundedness test. The caption is the cleanest case (authoritative info handed
+  to the model; mismatch = ignored available evidence; also feeds the wisdom-GT
+  prior).
+
+**UI placement of the meaning hierarchy (T9/D1 render target).** Inside the trust
+card, LEFT column, below the score and its explanation. Top-down: score → why
+this score → **top-level pattern** (headline) → per-section patterns. Compact
+cards + pills, color-coded by consequence. No crowding = progressive disclosure:
+pattern → section verdicts → counts → raw rules/edges on expand.
+
+**Dropped from the list:** T12 (CJK leak), T6 (duplicate edges) — weak link to
+trust or groundedness.
 
 ## Per-run findings log
 

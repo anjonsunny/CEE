@@ -813,6 +813,29 @@ The Q tests build dicts by hand, so they can only confirm the generators' own as
 
 ---
 
+## S. Stage-1 trust-calibration acceptance
+
+Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/shakedown_*.json`) — real model output, so each calibration change is proven to move the trust verdict the RIGHT way on the scene that motivated it. Built up phase by phase as the post-shakedown calibration lands (STAGE1_SHAKEDOWN.md T1–T16).
+
+### S1 — Shakedown fixtures present
+- **What:** All 9 scenes (push_02/06/09/14/37/41/45/55/61) are captured as fixtures with the fields trust needs.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### S2 — Calibration only tightens
+- **What:** Recomputing trust over each fixture with the current code never RAISES the score above the captured (pre-calibration) value. Calibration removes leniency; it must not loosen.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### S3 — Graph A conformance penalty is floored (T1)
+- **What:** `a_conformance_validity` ∈ [0.5, 1.0] for every fixture — a fully-broken Graph A scales the Internal term by 0.5, never 0, so trust lands a graded "low" rather than a literal 0.00.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### S4 — Phase-1 targets (T1 + T4)
+- **What:** push_06 (structurally-broken A) drops out of "high"; push_09 (good scene, lone effect-label slip) stays "moderate" (not over-penalized); push_14 (clean structure, omission) has `a_conformance_validity == 1.0` so the spine leaves it (its false-high is T5's job, later); push_61 (fabricated hazards on a safe scene) already drops to "low".
+- **Why:** Locks the Phase-1 wins to the real runs and pins what the spine should NOT touch (push_14), so later phases are attributable.
+- **Severity:** BLOCKING. **Status:** auto.
+
+---
+
 ## How to use this spec
 
 ### After any schema-rule change
