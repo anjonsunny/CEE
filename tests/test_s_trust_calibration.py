@@ -217,6 +217,35 @@ def test_s9_context_used_missed(main_module):
 
 
 @pytest.mark.blocking
+def test_s13_failures_by_consequence_saved(main_module):
+    """Priority #1: every failure is tagged with its consequence + impact and the
+    trust-cap math is exposed, all saved in the JSON (not re-derived on demand)."""
+    f = next(iter(FIXDIR.glob("shakedown_push_06_run_*.json")))
+    d = json.load(open(f))
+    raw = dict(d["structured_response"])
+    raw["caption"] = d.get("caption", "")
+    norm = main_module.normalize_result(raw)
+
+    # per-failure consequence breakdown in the verdict
+    b = norm["consequence_verdict"]["breakdown"]
+    assert set(b) == {"failures", "by_category", "total_impact"}
+    assert b["failures"], "no tagged failures"
+    for item in b["failures"]:
+        assert set(item) == {"type", "source", "consequence", "impact"}
+        assert item["consequence"] in main_module.CONSEQUENCE_IMPACT
+        assert item["impact"] == main_module.consequence_score(item["type"])
+    # push_06 carries the misrouted-rescue tag for the victim-as-threat failure
+    assert any(i["type"] == "at_risk_entity_used_as_threat" and i["consequence"] == "misrouted_rescue"
+               for i in b["failures"])
+    assert abs(b["total_impact"] - sum(i["impact"] for i in b["failures"])) < 1e-9
+
+    # trust-cap math exposed in components
+    comp = norm["pre_intervention_trust"]["components"]
+    for k in ("internal_passratio", "align_consequence_sum", "internal_consequence"):
+        assert k in comp, f"trust components missing {k}"
+
+
+@pytest.mark.blocking
 def test_s12_verdict_persisted_in_normalized_result(main_module):
     """The meaning hierarchy + core/spurious context must be written into the
     saved JSON (normalize_result), not only computed at render time, so saved

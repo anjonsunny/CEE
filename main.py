@@ -3257,6 +3257,9 @@ def assess_pre_intervention_trust(
             "a_conformance_validity": a_conformance_validity,  # T1
             "internal_effective": internal_eff,                # T1: internal * a_conformance_validity
             "coverage_excluded": coverage_excluded,            # T4
+            "internal_passratio": internal_passratio,          # T3: raw alignment pass ratio
+            "align_consequence_sum": align_consequence,        # T3: Σ victim-impact of failures
+            "internal_consequence": internal_consequence,      # T3: consequence-weighted cap on internal
         },
         "score_formula": score_formula,
     }
@@ -3925,6 +3928,26 @@ def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: di
         "Rule conformance": consequence_verdict_for(
             [str(v.get("rule", "")) for v in (rule_conformance.get("violations", []) or [])]),
     }
+
+    # Per-failure consequence breakdown (priority #1, saved+auditable): every
+    # failure tagged with its consequence category + victim-impact, plus totals.
+    tagged: list[dict[str, Any]] = []
+    for f in (alignment.get("failures", []) or []):
+        t = str(f.get("type", ""))
+        tagged.append({"type": t, "source": "Recommendation reasoning",
+                       "consequence": CONSEQUENCE_CATEGORY.get(t, "no_effect"),
+                       "impact": consequence_score(t)})
+    for v in (rule_conformance.get("violations", []) or []):
+        r = str(v.get("rule", ""))
+        tagged.append({"type": r, "source": "Rule conformance",
+                       "consequence": CONSEQUENCE_CATEGORY.get(r, "no_effect"),
+                       "impact": consequence_score(r)})
+    by_category: dict[str, int] = {}
+    for item in tagged:
+        by_category[item["consequence"]] = by_category.get(item["consequence"], 0) + 1
+    breakdown = {"failures": tagged, "by_category": by_category,
+                 "total_impact": round(sum(i["impact"] for i in tagged), 4)}
+
     context = analyze_caption_use(caption, threats or [], at_risk_objects or [])
     context["spurious"] = detect_spurious_grounding(alignment or {}, rule_conformance or {})
     # context used / missed / spurious pills (the 3rd element of every node):
@@ -3957,7 +3980,8 @@ def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: di
             "pills": ([{"label": "No victim-cost failures", "count": 0, "color": "green",
                         "tooltip": "No section carries a downstream decision or victim consequence."}]
                       + ctx_pills),
-            "worst_category": None, "worst_impact": 0.0, "sections": sections, "context": context,
+            "worst_category": None, "worst_impact": 0.0, "sections": sections,
+            "context": context, "breakdown": breakdown,
         }
 
     scored.sort(key=lambda nv: -nv[1]["worst_impact"])
@@ -3972,7 +3996,7 @@ def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: di
               "tooltip": v["takeaway"]} for name, v in scored] + ctx_pills
     return {"takeaway": takeaway, "pills": pills,
             "worst_category": worst, "worst_impact": worst_v["worst_impact"],
-            "sections": sections, "context": context}
+            "sections": sections, "context": context, "breakdown": breakdown}
 
 
 def generate_conformance_meaning(rule_conformance: dict[str, Any]) -> dict[str, Any]:
