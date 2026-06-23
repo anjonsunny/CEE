@@ -6115,17 +6115,22 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
                                 "If internal alignment fails, every downstream signal (trust, A↔B consistency, GT comparison) is built on a broken foundation.",
                             ]),
                             html.P([
-                                html.B("Severity tiers: "),
-                                html.Span("schema", className="failure-pill failure-pill-high failure-pill-inline"),
-                                " = output breaks the graph (e.g., undefined ID referenced). ",
-                                html.Span("consistency", className="failure-pill failure-pill-mid failure-pill-inline"),
-                                " = model contradicts itself (e.g., threat state doesn't match detected state). ",
-                                html.Span("duplication", className="failure-pill failure-pill-low failure-pill-inline"),
-                                " = redundant near-identical recommendations.",
+                                html.B("Reading each failure: "),
+                                "every failure reads as what broke → what it costs the response, worst consequence first "
+                                "(e.g. broken hazard link → danger under-treated · 0.6). The weight is the victim cost: "
+                                "1.0 victim gets no help, 0.9 help aimed the wrong way, 0.6 danger under-treated, "
+                                "0.3 effort on a non-threat, 0.1 slower to act, 0.0 no real impact. A ",
+                                html.Span("spurious", className="cons-tag cons-spurious"),
+                                " flag marks reliance on something that isn't a real hazard; ",
+                                html.Span("unknown impact", className="cons-tag cons-unknown"),
+                                " is reasoning we couldn't interpret (flagged, not scored). The technical rule name and "
+                                "structural family (schema/consistency/duplication) are the muted line beneath each row.",
                             ]),
                             html.P([
-                                html.B("Reading: "),
-                                "The score is passed / total checks. Number of checks varies per scene (more objects = more checks). This is the dominant component (40%) of the Trust score above.",
+                                html.B("Reading the section: "),
+                                "the top line turns these failures into one trust verdict — the worst victim consequence "
+                                "plus the pass stats. The score is passed / total checks (varies per scene), and it is the "
+                                "dominant component of the Trust score above.",
                             ], style={"fontStyle": "italic", "marginBottom": "0"}),
                         ],
                         className="gt-val-explainer-body",
@@ -11386,7 +11391,6 @@ app.index_string = """<!DOCTYPE html>
             .cons-amber { background: #fef9c3; color: #854d0e; }
             .cons-grey { background: #e2e8f0; color: #475569; }
             .cons-spurious { background: #fce7f3; color: #9d174f; border: 1px dashed #db2777; }
-            .failure-consequence-text { color: #1e293b; font-size: 13px; }
             .failure-phrase-text { color: #1e293b; font-size: 13px; font-weight: 600; }
             .failure-arrow { color: #94a3b8; font-size: 12px; }
             .cons-unknown { background: #ede9fe; color: #5b21b6; border: 1px dashed #8b5cf6; }
