@@ -843,6 +843,10 @@ Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/sha
 - **What:** Every error in `CONSEQUENCE_CATEGORY` resolves to a known `CONSEQUENCE_IMPACT` category; impacts ∈ [0,1]; the victim-cost ordering holds (missed rescue 1.0 > misrouted 0.9 > under-response 0.6 > wasted 0.3 > no-effect 0.0); unknown errors default to no_effect.
 - **Severity:** BLOCKING. **Status:** auto.
 
+### S12 — Verdict persisted in saved JSON
+- **What:** `normalize_result` writes `consequence_verdict` (meaning-hierarchy top + sections + core/spurious context) into the result, so saved runs carry it for comparison/batch (not render-time only). The render callback reads the persisted value, falling back to compute for old data. push_61 round-trips with worst=wasted_response and spurious populated.
+- **Severity:** BLOCKING. **Status:** auto.
+
 ### S10 — Consequence coverage (no silent zero) [sweep regression-lock]
 - **What:** Every failure type/rule the system can emit must be mapped in CONSEQUENCE_CATEGORY (else it silently scores 0 impact, invisible to the trust cap AND the meaning hierarchy). Locks: all FAILURE_SEVERITY / FAILURE_CATEGORY / RULE_TO_FAMILY keys are in CONSEQUENCE_CATEGORY; FAILURE_SEVERITY and FAILURE_CATEGORY enumerate the same types; every type/rule fired in the 9 runs is mapped in consequence AND categorized for the batch report (alignment→FAILURE_CATEGORY, conformance→RULE_TO_FAMILY), so nothing buckets to "other"/"mid"; all categories resolve to a valid impact.
 - **Why:** The sweep found 5 emitted types unmapped in CONSEQUENCE_CATEGORY (silent 0), invalid_graph_edge missing from FAILURE_SEVERITY, and 11 alignment types missing from the batch-report maps (skewing grounding%/severity). This test prevents recurrence.

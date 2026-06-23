@@ -3409,6 +3409,16 @@ def normalize_result(raw: dict[str, Any], image_contents: str | None = None) -> 
         result["causal_graph"], result.get("graph_b", {})
     )
 
+    # Meaning hierarchy + core/spurious context (T9 / priority #2-#3). Persisted
+    # here (not just render-time) so every saved run carries it for comparison.
+    result["consequence_verdict"] = generate_consequence_verdict(
+        result["pre_internal_alignment"],
+        result["rule_conformance"],
+        caption=str(result.get("caption", "")),
+        threats=result.get("threats", []),
+        at_risk_objects=result.get("at_risk_objects", []),
+    )
+
     return result
 
 
@@ -13410,7 +13420,8 @@ def render_results(
     conformance_meaning = render_meaning_header(generate_conformance_meaning(normalized.get("rule_conformance", {})))
     pathology_meaning = render_meaning_header(generate_pathology_meaning(normalized.get("pathologies", {})))
     accuracy_meaning = render_meaning_header(generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
-    consequence_verdict = generate_consequence_verdict(
+    # Persisted in normalize_result; fall back to computing if absent (old data).
+    consequence_verdict = normalized.get("consequence_verdict") or generate_consequence_verdict(
         normalized.get("pre_internal_alignment", {}), normalized.get("rule_conformance", {}),
         caption=str(normalized.get("caption", "")),
         threats=normalized.get("threats", []),

@@ -217,6 +217,25 @@ def test_s9_context_used_missed(main_module):
 
 
 @pytest.mark.blocking
+def test_s12_verdict_persisted_in_normalized_result(main_module):
+    """The meaning hierarchy + core/spurious context must be written into the
+    saved JSON (normalize_result), not only computed at render time, so saved
+    runs carry it for comparison/batch."""
+    f = next(iter(FIXDIR.glob("shakedown_push_61_run_*.json")))
+    d = json.load(open(f))
+    raw = dict(d["structured_response"])
+    raw["caption"] = d.get("caption", "")
+    norm = main_module.normalize_result(raw)
+    cv = norm.get("consequence_verdict")
+    assert cv is not None, "consequence_verdict not persisted in normalize_result"
+    for k in ("takeaway", "pills", "sections", "context", "worst_category", "worst_impact"):
+        assert k in cv, f"persisted verdict missing {k}"
+    # push_61 (benign park) → spurious grounding surfaced and persisted
+    assert cv["worst_category"] == "wasted_response"
+    assert cv["context"]["spurious"]
+
+
+@pytest.mark.blocking
 def test_s10_consequence_coverage_no_silent_zero(main_module):
     """Sweep regression-lock: every failure type/rule the system can emit must be
     mapped in CONSEQUENCE_CATEGORY, or it silently scores 0 impact (invisible to
