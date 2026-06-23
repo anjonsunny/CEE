@@ -271,6 +271,37 @@ def test_s12_verdict_persisted_in_normalized_result(main_module):
 
 
 @pytest.mark.blocking
+def test_s15_alignment_panel_consequence_first(main_module):
+    """The Internal Alignment section surfaces the 3 priorities: a per-section
+    consequence verdict (#2), each failure tagged by victim consequence (#1), and
+    a spurious flag on spurious-grounding failures (#3)."""
+    def text(n, acc):
+        ch = getattr(n, "children", None)
+        if isinstance(ch, str):
+            acc.append(ch)
+        elif isinstance(ch, (list, tuple)):
+            for c in ch:
+                text(c, acc)
+        elif ch is not None:
+            text(ch, acc)
+        return acc
+
+    # push_02: consequence verdict header + consequence labels present
+    al02 = _load()["push_02"]["pre_internal_alignment"]
+    blob02 = " ".join(text(main_module.make_pre_internal_alignment_panel(al02), []))
+    assert "What these failures cost" in blob02          # #2 section verdict
+    assert any(lbl in blob02 for lbl in ("Under-response", "Wasted response"))  # #1 consequence tags
+
+    # push_61: at-risk-on-a-park failures are spurious → the spurious flag renders
+    al61 = _load()["push_61"]["pre_internal_alignment"]
+    has_spurious = any(str(f.get("type", "")) in main_module.SPURIOUS_GROUNDING_RULES
+                       for f in al61.get("failures", []))
+    assert has_spurious, "push_61 fixture should contain a spurious alignment failure"
+    blob61 = " ".join(text(main_module.make_pre_internal_alignment_panel(al61), []))
+    assert "spurious" in blob61
+
+
+@pytest.mark.blocking
 def test_s14_trust_contribution_bar(main_module):
     """The trust card's contribution bar: the 4 additive blocks sum to the score,
     and the bar/legend shows the zero-contributors too (pathology etc.)."""

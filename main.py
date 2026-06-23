@@ -5820,6 +5820,18 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
         label_map = {"high": "schema", "mid": "consistency", "low": "duplication"}
         return html.Span(label_map[sev], className=f"failure-pill failure-pill-{sev}")
 
+    # Priority #1 — tag each failure by its VICTIM CONSEQUENCE (not just its
+    # structural family). Priority #3 — flag the spurious-grounding ones.
+    def consequence_pill(failure_type: str) -> html.Span:
+        cat = CONSEQUENCE_CATEGORY.get(failure_type, "no_effect")
+        imp = CONSEQUENCE_IMPACT.get(cat, 0.0)
+        label = CONSEQUENCE_LABEL.get(cat, "No effect")
+        return html.Span(f"{label} {imp:.1f}", className=f"cons-tag cons-{consequence_color(imp)}")
+
+    # Priority #2 — this section's verdict: the worst victim consequence among
+    # its failures, composed exactly as the trust-card hierarchy does.
+    section_verdict = consequence_verdict_for([str(f.get("type", "")) for f in failures])
+
     def failure_detail_text(failure: dict[str, Any]) -> str:
         details: list[str] = []
 
@@ -5862,9 +5874,12 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
                 [
                     html.Div(
                         [
-                            severity_pill(f.get("type", "")),
+                            consequence_pill(f.get("type", "")),
+                            *([html.Span("spurious", className="cons-tag cons-spurious")]
+                              if str(f.get("type", "")) in SPURIOUS_GROUNDING_RULES else []),
                             html.Span(f.get("type", "failure"), className="failure-type"),
                             html.Span(f" — {f.get('message', '')}", className="failure-message"),
+                            severity_pill(f.get("type", "")),
                         ],
                         className="failure-main-line",
                     ),
@@ -5956,16 +5971,27 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
                 ],
                 className="consistency-score-row",
             ),
+            # Priority #2 — section verdict: what these failures cost a victim.
+            html.Div(
+                [
+                    html.Div("What these failures cost (worst first)", className="trust-section-label"),
+                    *render_meaning_header(section_verdict),
+                ],
+                className="alignment-consequence-verdict",
+            ),
             html.Div(
                 [
                     html.Div(
                         [
-                            html.Span("schema", className="failure-pill failure-pill-high failure-pill-inline"),
-                            " breaks the graph · ",
-                            html.Span("consistency", className="failure-pill failure-pill-mid failure-pill-inline"),
-                            " contradicts itself · ",
-                            html.Span("duplication", className="failure-pill failure-pill-low failure-pill-inline"),
-                            " is redundancy.",
+                            "Each failure is tagged by its victim consequence (",
+                            html.Span("missed", className="cons-tag cons-red"), " · ",
+                            html.Span("misrouted", className="cons-tag cons-red"), " · ",
+                            html.Span("under", className="cons-tag cons-orange"), " · ",
+                            html.Span("wasted", className="cons-tag cons-amber"), " · ",
+                            html.Span("slowed", className="cons-tag cons-grey"),
+                            "); ",
+                            html.Span("spurious", className="cons-tag cons-spurious"),
+                            " marks reliance on a non-hazard. Structural family (schema/consistency/duplication) is the small trailing tag.",
                         ],
                         className="alignment-note",
                     ),
@@ -11165,6 +11191,13 @@ app.index_string = """<!DOCTYPE html>
             .pill-orange { background: #ffedd5; color: #9a3412; }
             .pill-bad { background: #fee2e2; color: #991b1b; }
             .pill-neutral { background: #e2e8f0; color: #475569; }
+            .cons-tag { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 10px; margin-right: 6px; white-space: nowrap; }
+            .cons-red { background: #fee2e2; color: #991b1b; }
+            .cons-orange { background: #ffedd5; color: #9a3412; }
+            .cons-amber { background: #fef9c3; color: #854d0e; }
+            .cons-grey { background: #e2e8f0; color: #475569; }
+            .cons-spurious { background: #fce7f3; color: #9d174f; border: 1px dashed #db2777; }
+            .alignment-consequence-verdict { margin: 6px 0 10px; padding: 8px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
             .contrib-card { margin: 8px 0; padding: 8px 10px; background: #f8fafc; border-radius: 6px; }
             .contrib-bar { display: flex; width: 100%; height: 18px; border-radius: 4px; overflow: hidden; background: #eef2f7; margin: 4px 0 8px; }
             .contrib-seg { height: 100%; }
