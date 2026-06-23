@@ -6064,8 +6064,6 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
                                       title=consequence_explanation(str(f.get("type", "")))),
                             html.Span(" → ", className="failure-arrow"),
                             consequence_pill(f.get("type", "")),
-                            *([html.Span("spurious", className="cons-tag cons-spurious")]
-                              if str(f.get("type", "")) in SPURIOUS_GROUNDING_RULES else []),
                         ],
                         className="failure-main-line",
                     ),
@@ -6119,9 +6117,7 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
                                 "every failure reads as what broke → what it costs the response, worst consequence first "
                                 "(e.g. broken hazard link → danger under-treated · 0.6). The weight is the victim cost: "
                                 "1.0 victim gets no help, 0.9 help aimed the wrong way, 0.6 danger under-treated, "
-                                "0.3 effort on a non-threat, 0.1 slower to act, 0.0 no real impact. A ",
-                                html.Span("spurious", className="cons-tag cons-spurious"),
-                                " flag marks reliance on something that isn't a real hazard; ",
+                                "0.3 effort on a non-threat, 0.1 slower to act, 0.0 no real impact. ",
                                 html.Span("unknown impact", className="cons-tag cons-unknown"),
                                 " is reasoning we couldn't interpret (flagged, not scored). The technical rule name and "
                                 "structural family (schema/consistency/duplication) are the muted line beneath each row.",
@@ -6202,6 +6198,30 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
             ),
         ],
         className="consistency-panel",
+    )
+
+
+def make_reasoning_section_meaning(alignment: dict[str, Any]) -> html.Div:
+    """Higher-level meaning at the TOP of the 'Is the reasoning sound?' section:
+    one labeled block per subsection (its trust sentence + consequence pills),
+    replacing the old self-incoherent pattern line. Currently surfaces Internal
+    Alignment; A↔B Consistency joins here when that subsection is converted."""
+    passed = int(alignment.get("passed_checks", 0) or 0)
+    failed = int(alignment.get("failed_checks", 0) or 0)
+    total = passed + failed
+    sv = consequence_verdict_for([str(f.get("type", "")) for f in (alignment.get("failures", []) or [])])
+    sentence = section_trust_sentence(passed, total, sv.get("worst_category"), sv.get("worst_impact", 0.0))
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div("Internal alignment", className="subsection-meaning-label"),
+                    *render_meaning_header({**sv, "takeaway": sentence}),
+                ],
+                className="subsection-meaning",
+            ),
+        ],
+        className="reasoning-section-meaning",
     )
 
 
@@ -11390,7 +11410,6 @@ app.index_string = """<!DOCTYPE html>
             .cons-orange { background: #ffedd5; color: #9a3412; }
             .cons-amber { background: #fef9c3; color: #854d0e; }
             .cons-grey { background: #e2e8f0; color: #475569; }
-            .cons-spurious { background: #fce7f3; color: #9d174f; border: 1px dashed #db2777; }
             .failure-phrase-text { color: #1e293b; font-size: 13px; font-weight: 600; }
             .failure-arrow { color: #94a3b8; font-size: 12px; }
             .cons-unknown { background: #ede9fe; color: #5b21b6; border: 1px dashed #8b5cf6; }
@@ -11398,6 +11417,9 @@ app.index_string = """<!DOCTYPE html>
             .failure-tech-line .failure-type { color: #64748b; font-family: monospace; }
             .failure-tech-line .failure-message { color: #94a3b8; }
             .alignment-consequence-verdict { margin: 6px 0 10px; padding: 8px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
+            .reasoning-section-meaning { display: flex; flex-direction: column; gap: 8px; }
+            .subsection-meaning { padding: 6px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
+            .subsection-meaning-label { font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
             .contrib-card { margin: 8px 0; padding: 8px 10px; background: #f8fafc; border-radius: 6px; }
             .contrib-bar { display: flex; width: 100%; height: 18px; border-radius: 4px; overflow: hidden; background: #eef2f7; margin: 4px 0 8px; }
             .contrib-seg { height: 100%; }
@@ -13775,7 +13797,9 @@ def render_results(
     # Meaning Generator from Failure: per-section takeaway + pills for the headers.
     # Persisted in normalize_result; fall back to computing for old data.
     sm = normalized.get("section_meanings") or {}
-    reasoning_meaning = render_meaning_header(sm.get("reasoning") or generate_alignment_meaning(normalized.get("pre_internal_alignment", {})))
+    # Reasoning header now surfaces the subsection higher-level meaning (trust
+    # sentence + consequence pills), not the old self-incoherent pattern.
+    reasoning_meaning = make_reasoning_section_meaning(normalized.get("pre_internal_alignment", {}))
     conformance_meaning = render_meaning_header(sm.get("conformance") or generate_conformance_meaning(normalized.get("rule_conformance", {})))
     pathology_meaning = render_meaning_header(sm.get("pathology") or generate_pathology_meaning(normalized.get("pathologies", {})))
     accuracy_meaning = render_meaning_header(sm.get("accuracy") or generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))

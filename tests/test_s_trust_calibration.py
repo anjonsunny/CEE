@@ -300,13 +300,16 @@ def test_s15_alignment_panel_consequence_first(main_module):
     assert any(lbl in blob02 for lbl in ("danger under-treated", "effort on a non-threat"))  # #1
     assert any(ph in blob02 for ph in ("broken hazard link", "targets nothing real", "undetected victim"))  # failure phrase
 
-    # push_61: at-risk-on-a-park failures are spurious → the spurious flag renders
-    al61 = _load()["push_61"]["pre_internal_alignment"]
-    has_spurious = any(str(f.get("type", "")) in main_module.SPURIOUS_GROUNDING_RULES
-                       for f in al61.get("failures", []))
-    assert has_spurious, "push_61 fixture should contain a spurious alignment failure"
-    blob61 = " ".join(text(main_module.make_pre_internal_alignment_panel(al61), []))
-    assert "spurious" in blob61
+    # core/spurious is NOT shown per-error in this section (it's scene-level)
+    assert "spurious" not in blob02
+
+    # the reasoning section header surfaces the subsection higher-level meaning
+    # (labeled trust sentence + pills), replacing the old self-incoherent line
+    hdr = " ".join(text(main_module.make_reasoning_section_meaning(al02), []))
+    assert "Internal alignment" in hdr
+    assert "checks pass" in hdr                              # trust sentence
+    assert any(lbl in hdr for lbl in ("danger under-treated", "effort on a non-threat"))
+    assert "self-incoherent" not in hdr.lower()             # old framing gone
 
 
 @pytest.mark.blocking
