@@ -7271,6 +7271,20 @@ def _process_one_image(
                 result["causal_graph"],
                 result["pre_intervention_trust"],
             )
+            # Re-derive rule conformance + the meaning/core-spurious verdict
+            # against the real Graph B too (normalize_result ran them against the
+            # empty placeholder). Keeps the saved batch verdict non-stale and at
+            # parity with the single-run save path.
+            result["rule_conformance"] = compute_rule_conformance(
+                result["causal_graph"], graph_b
+            )
+            result["consequence_verdict"] = generate_consequence_verdict(
+                result.get("pre_internal_alignment", {}),
+                result["rule_conformance"],
+                caption=caption or "",
+                threats=result.get("threats", []),
+                at_risk_objects=result.get("at_risk_objects", []),
+            )
         except Exception:
             pass  # graph_b stays at placeholder
 
