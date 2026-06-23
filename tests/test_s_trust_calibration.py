@@ -134,11 +134,17 @@ def test_s7_consequence_verdict(main_module):
     v06 = verdict("push_06")
     assert v06["worst_category"] == "misrouted_rescue"
     assert v06["pills"][0]["color"] == "red"
-    assert "Misrouted rescue" in v06["takeaway"]
+    assert "help aimed the wrong way" in v06["takeaway"]
     # push_61: fabricated hazards on a safe scene → Wasted response (over-firing).
     assert verdict("push_61")["worst_category"] == "wasted_response"
-    # push_14: only cosmetic failures → Slowed response (the omission is invisible here, → T5).
-    assert verdict("push_14")["worst_category"] == "slowed_response"
+    # push_14: its failures are now bookkeeping (no real impact) or uninterpretable
+    # ("unknown impact", out_of_vocabulary_state), so there is NO victim-cost
+    # consequence; the unknown garble is flagged, not scored.
+    v14 = verdict("push_14")
+    assert v14["worst_category"] is None
+    # the uninterpretable garble is flagged as unknown-impact in its section
+    assert any(p["color"] == "unknown"
+               for p in v14["sections"]["Recommendation reasoning"]["pills"])
 
     # Clean input → green "no victim-cost failures".
     clean = main_module.generate_consequence_verdict({"failures": []}, {"violations": []})
@@ -189,7 +195,7 @@ def test_s8_verdict_renders_in_trust_card(main_module):
     assert "Bottom line" in blob          # tier-1 header
     assert "By section" in blob           # tier-2 disclosure
     assert "Recommendation reasoning" in blob
-    assert "Misrouted" in blob
+    assert "help aimed the wrong way" in blob   # relatable consequence label
 
 
 @pytest.mark.blocking
@@ -286,11 +292,13 @@ def test_s15_alignment_panel_consequence_first(main_module):
             text(ch, acc)
         return acc
 
-    # push_02: consequence verdict header + consequence labels present
+    # push_02: section trust sentence + relatable consequence labels + failure phrases
     al02 = _load()["push_02"]["pre_internal_alignment"]
     blob02 = " ".join(text(main_module.make_pre_internal_alignment_panel(al02), []))
-    assert "What these failures cost" in blob02          # #2 section verdict
-    assert any(lbl in blob02 for lbl in ("Under-response", "Wasted response"))  # #1 consequence tags
+    assert "What this section means for trust" in blob02         # #2 section verdict header
+    assert "trust this section's output" in blob02 or "trustworthy" in blob02  # trust sentence
+    assert any(lbl in blob02 for lbl in ("danger under-treated", "effort on a non-threat"))  # #1
+    assert any(ph in blob02 for ph in ("broken hazard link", "targets nothing real", "undetected victim"))  # failure phrase
 
     # push_61: at-risk-on-a-park failures are spurious → the spurious flag renders
     al61 = _load()["push_61"]["pre_internal_alignment"]
@@ -299,6 +307,46 @@ def test_s15_alignment_panel_consequence_first(main_module):
     assert has_spurious, "push_61 fixture should contain a spurious alignment failure"
     blob61 = " ".join(text(main_module.make_pre_internal_alignment_panel(al61), []))
     assert "spurious" in blob61
+
+
+@pytest.mark.blocking
+def test_s16_consequence_phrases_and_unknown_class(main_module):
+    """The relatable consequence phrases, the brief failure phrases, and the new
+    'unknown impact' class (uninterpretable garble: flagged, not a victim cost)."""
+    m = main_module
+    # relatable consequence labels
+    assert m.CONSEQUENCE_LABEL["under_response"] == "danger under-treated"
+    assert m.CONSEQUENCE_LABEL["wasted_response"] == "effort on a non-threat"
+    assert m.CONSEQUENCE_LABEL["unknown"] == "unknown impact"
+    # failure phrase + consequence phrase helpers
+    assert m.failure_phrase("invalid_graph_edge") == "broken hazard link"
+    assert m.consequence_phrase("invalid_graph_edge") == "danger under-treated"
+    assert m.failure_phrase("never_seen_type") == "never seen type"  # fallback
+
+    # reclassification: uninterpretable garble → unknown (0.0, flagged, not scored)
+    for t in ("invalid_effect_label", "via_state_mismatch", "out_of_vocabulary_state",
+              "self_loop_not_worsens"):
+        assert m.is_unknown_impact(t), t
+        assert m.consequence_score(t) == 0.0          # no victim cost asserted
+    # understood-redundancy → no real impact (NOT unknown)
+    for t in ("redundant_instancing", "node_budget_exceeded"):
+        assert m.CONSEQUENCE_CATEGORY[t] == "no_effect"
+        assert not m.is_unknown_impact(t)
+    # responder-facing clutter stays slowed
+    assert m.CONSEQUENCE_CATEGORY["duplicate_recommendation_quad"] == "slowed_response"
+
+    # unknown is flagged in a section verdict but never the "worst"
+    sv = m.consequence_verdict_for(["invalid_effect_label", "via_state_mismatch"])
+    assert sv["worst_category"] is None
+    assert any(p["color"] == "unknown" for p in sv["pills"])
+
+    # section trust sentence scales with the worst consequence
+    s_hi = m.section_trust_sentence(10, 20, "misrouted_rescue", 0.9)
+    s_mid = m.section_trust_sentence(10, 20, "under_response", 0.6)
+    s_clean = m.section_trust_sentence(20, 20, None, 0.0)
+    assert "do not trust" in s_hi
+    assert "with care" in s_mid
+    assert "trustworthy" in s_clean
 
 
 @pytest.mark.blocking

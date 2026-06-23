@@ -3728,13 +3728,17 @@ RULE_TO_FAMILY: dict[str, str] = {
 # is what trust weights by, instead of head-counting failures. See
 # STAGE1_SHAKEDOWN.md (T3 / the consequence categories).
 # ---------------------------------------------------------------------------
-CONSEQUENCE_IMPACT = {  # category -> impact score
+CONSEQUENCE_IMPACT = {  # category -> victim-cost impact score
     "missed_rescue": 1.0,     # a person in danger gets no help (victim dropped)
     "misrouted_rescue": 0.9,  # rescue aimed wrong / a victim treated as a threat
     "under_response": 0.6,    # real danger softened or dropped -> too little, too late
     "wasted_response": 0.3,   # effort on a non-threat -> fatigue, dilution
-    "slowed_response": 0.1,   # overloaded / unreadable brief -> delay
-    "no_effect": 0.0,         # bookkeeping only, no decision change
+    "slowed_response": 0.1,   # responder-facing clutter -> slower triage
+    "no_effect": 0.0,         # understood + harmless: bookkeeping, redundancy
+    # "unknown" reasoning garble: we cannot read what the model meant, so we do
+    # NOT assert a victim cost (0.0 in the ledger). It is flagged separately and
+    # its real penalty lands on trust via the conformance multiplier.
+    "unknown": 0.0,
 }
 
 # error -> consequence category. Errors absent from this map default to no_effect.
@@ -3772,18 +3776,20 @@ CONSEQUENCE_CATEGORY: dict[str, str] = {
     "recommendation_state_mismatch": "wasted_response",
     "threat_state_mismatch": "wasted_response",
     "threat_state_not_hazard_bearing": "wasted_response",
-    # --- Slowed response (operator overload / garbled output) ---
-    "redundant_instancing": "slowed_response",
-    "node_budget_exceeded": "slowed_response",
-    "effect_not_in_vocabulary": "slowed_response",
-    "out_of_vocabulary_state": "slowed_response",
-    "self_loop_not_worsens": "slowed_response",
-    "invalid_effect_label": "slowed_response",
-    "invalid_self_loop_effect": "slowed_response",
-    "via_state_not_hazard_bearing": "slowed_response",
-    "via_state_mismatch": "slowed_response",
-    "duplicate_recommendation_quad": "slowed_response",  # same action twice -> padded brief
-    # --- No effect (cosmetic / bookkeeping) ---
+    # --- Slowed response (responder-facing clutter only) ---
+    "duplicate_recommendation_quad": "slowed_response",  # duplicate action in the brief
+    # --- Unknown impact (uninterpretable reasoning garble; not a victim cost,
+    #     flagged separately, penalty lands on trust via conformance) ---
+    "effect_not_in_vocabulary": "unknown",
+    "out_of_vocabulary_state": "unknown",
+    "self_loop_not_worsens": "unknown",
+    "invalid_effect_label": "unknown",
+    "invalid_self_loop_effect": "unknown",
+    "via_state_not_hazard_bearing": "unknown",
+    "via_state_mismatch": "unknown",
+    # --- No real impact (understood + harmless: redundancy + bookkeeping) ---
+    "redundant_instancing": "no_effect",
+    "node_budget_exceeded": "no_effect",
     "redundant_self_loop": "no_effect",
     "merge_rule_violation": "no_effect",
     "quad_ids_missing_from_reason": "no_effect",
@@ -3795,6 +3801,168 @@ CONSEQUENCE_CATEGORY: dict[str, str] = {
     "duplicate_remaining_risk": "no_effect",
 }
 
+# Plain-language consequence of each failure: what it actually DOES to the
+# emergency response, victim-framed, so a reader understands "Under-response"
+# instead of just seeing the label. Falls back to the per-category headline.
+CONSEQUENCE_EXPLANATION = {
+    # missed rescue
+    "smoke_superset_violation": "smoke-exposed victims are left out of the at-risk set, so they may get no rescue",
+    "at_risk_state_missing_from_at_risk_block": "a victim in distress is dropped from the at-risk list, so no one is sent for them",
+    # misrouted rescue
+    "at_risk_entity_used_as_threat": "a victim is treated as a threat, so response is aimed at them instead of at saving them",
+    "at_risk_entity_also_in_threats": "a victim is listed as both victim and threat, so responders get contradictory instructions",
+    "hazardous_and_at_risk": "one entity is both the hazard and the victim, so the response can't tell whom to protect from what",
+    "distress_state_on_non_living": "a non-living object is given a victim state, so rescue effort is misdirected at an object",
+    # under-response
+    "hazard_state_missing_from_threats": "a real hazard isn't declared a threat, so it gets little or no response",
+    "fluid_wrong_effect_for_person": "the hazard's effect on a person is mislabeled, so the danger is under-stated",
+    "may_harm_hazardous_target": "an action targets a hazard as if it were a victim, so the real victim is under-served",
+    "spread_between_hazards": "spread is drawn hazard-to-hazard instead of toward victims, so victim risk is under-counted",
+    "one_way_worsens": "a worsening link is only one-way, understating how bad it gets",
+    "hazardous_node_no_edges": "a declared hazard has no consequences drawn, so it reads as harmless and gets too little response",
+    "hazard_flag_state_mismatch": "the hazard flag and state disagree, so the danger may be under-rated",
+    "unresolved_affected_object": "the action points at someone not in the scene, so a real victim may get no protection",
+    "unresolved_endpoint": "an edge points to a node that doesn't exist, so part of the danger chain is lost",
+    "invalid_graph_edge": "the hazard-to-victim link is malformed, so that danger's reasoning chain breaks",
+    "latent_active_conflict": "a hazard is marked both active and latent, so an active danger may be treated as not-yet-a-problem and handled too late",
+    "threat_missing_detected_object": "a threat points at an object never detected, so the hazard can't be acted on properly",
+    # wasted response (false alarm / effort on non-threats)
+    "edge_from_non_hazardous": "a danger link starts from a harmless object, so effort is spent on a non-threat",
+    "normal_state_listed_as_threat": "a calm, normal object is called a threat, so responders chase a false alarm",
+    "uncoupled_obstruction": "an obstruction is flagged with no hazard behind it, so it draws effort for no reason",
+    "at_risk_missing_detected_object": "a victim is flagged that was never detected, so responders may be sent to someone who isn't there",
+    "normal_state_listed_as_at_risk": "a safe person is marked at-risk, so rescue effort is spent where there is no danger",
+    "at_risk_state_not_at_risk_bearing": "an at-risk entity isn't actually in a victim state, so it's a false victim",
+    "at_risk_entity_unreached": "a flagged victim has no hazard or action tied to them, so it's a false alarm drawing effort",
+    "recommendation_threat_not_declared": "an action cites a threat that was never declared, so it acts on an unlisted hazard",
+    "recommendation_state_mismatch": "the action's stated condition doesn't match the entity, so it may address the wrong thing",
+    "threat_state_mismatch": "the threat's state contradicts the detection, so the wrong hazard may be acted on",
+    "threat_state_not_hazard_bearing": "a threat isn't in a hazardous state, so it's a non-threat drawing effort",
+    # slowed response (garbled / padded brief)
+    "duplicate_recommendation_quad": "the same action is listed twice, padding the brief and slowing triage",
+    "redundant_instancing": "the same thing is modeled twice, cluttering the brief",
+    "node_budget_exceeded": "the graph carries more nodes than allowed, making the brief harder to read fast",
+    "effect_not_in_vocabulary": "an effect label outside the vocabulary is used, so the link is harder to parse",
+    "out_of_vocabulary_state": "a state outside the vocabulary is used, so the brief is harder to parse",
+    "self_loop_not_worsens": "a self-loop uses an effect other than worsens, garbling the model slightly",
+    "invalid_effect_label": "an unknown effect label is used, garbling that link",
+    "invalid_self_loop_effect": "a self-loop carries an invalid effect, garbling that node",
+    "via_state_not_hazard_bearing": "the via-state on a link isn't a hazard state, so the link reads oddly",
+    "via_state_mismatch": "the via-state doesn't match the source, so the link is slightly garbled",
+    # no effect (bookkeeping only)
+    "redundant_self_loop": "a harmless duplicate self-loop; no effect on the decision",
+    "merge_rule_violation": "an instancing/merge bookkeeping slip; no effect on the decision",
+    "quad_ids_missing_from_reason": "ids missing from the reason text; traceability only, no decision change",
+    "quad_ids_missing_from_related_object_ids": "ids missing from related_object_ids; traceability only",
+    "reason_ids_missing_from_links": "the reason mentions ids not in the links; traceability only",
+    "related_object_missing_detected_object": "a related-id isn't in detected_objects; traceability only",
+    "remaining_risk_object_missing_detected_object": "a remaining-risk id isn't in detected_objects; traceability only",
+    "remaining_risk_state_mismatch": "a remaining-risk state mismatch; bookkeeping only",
+    "duplicate_remaining_risk": "a duplicated remaining-risk entry; bookkeeping only",
+}
+
+
+def consequence_explanation(failure_type: str) -> str:
+    """Plain-language 'what this failure does' for a failure type, victim-framed."""
+    if failure_type in CONSEQUENCE_EXPLANATION:
+        return CONSEQUENCE_EXPLANATION[failure_type]
+    cat = CONSEQUENCE_CATEGORY.get(failure_type, "no_effect")
+    return CONSEQUENCE_HEADLINE.get(cat, "no effect on the decision")
+
+
+# Brief 2-3 word phrase naming WHAT each failure is (the failure phrase shown in
+# the row, paired with the consequence phrase). Falls back to the raw type.
+FAILURE_PHRASE = {
+    # victim gets no help
+    "smoke_superset_violation": "smoke victims missed",
+    "at_risk_state_missing_from_at_risk_block": "victim not listed",
+    # help aimed the wrong way
+    "at_risk_entity_used_as_threat": "victim treated as threat",
+    "at_risk_entity_also_in_threats": "victim and threat at once",
+    "hazardous_and_at_risk": "hazard and victim at once",
+    "distress_state_on_non_living": "object marked a victim",
+    # danger under-treated
+    "hazard_state_missing_from_threats": "hazard not declared",
+    "fluid_wrong_effect_for_person": "mislabeled harm on person",
+    "may_harm_hazardous_target": "action aimed at a hazard",
+    "spread_between_hazards": "spread drawn hazard-to-hazard",
+    "one_way_worsens": "one-way worsening",
+    "hazardous_node_no_edges": "idle hazard (no effects)",
+    "hazard_flag_state_mismatch": "hazard flag/state mismatch",
+    "unresolved_affected_object": "targets nothing real",
+    "unresolved_endpoint": "link to nowhere",
+    "invalid_graph_edge": "broken hazard link",
+    "latent_active_conflict": "active-vs-latent clash",
+    "threat_missing_detected_object": "undetected threat",
+    # effort on a non-threat
+    "edge_from_non_hazardous": "link from a non-hazard",
+    "normal_state_listed_as_threat": "calm thing called a threat",
+    "uncoupled_obstruction": "blocker with nothing behind it",
+    "at_risk_missing_detected_object": "undetected victim",
+    "normal_state_listed_as_at_risk": "safe person marked at-risk",
+    "at_risk_state_not_at_risk_bearing": "not really a victim state",
+    "at_risk_entity_unreached": "false victim (no hazard)",
+    "recommendation_threat_not_declared": "acts on an unlisted threat",
+    "recommendation_state_mismatch": "wrong condition acted on",
+    "threat_state_mismatch": "threat state contradicts scene",
+    "threat_state_not_hazard_bearing": "threat isn't hazardous",
+    # slower to act
+    "duplicate_recommendation_quad": "duplicate action",
+    # unknown impact (uninterpretable)
+    "effect_not_in_vocabulary": "unknown effect label",
+    "out_of_vocabulary_state": "unknown state word",
+    "self_loop_not_worsens": "bad self-loop effect",
+    "invalid_effect_label": "invalid effect label",
+    "invalid_self_loop_effect": "invalid self-loop",
+    "via_state_not_hazard_bearing": "non-hazard via-state",
+    "via_state_mismatch": "via-state mismatch",
+    # no real impact
+    "redundant_instancing": "same thing modeled twice",
+    "node_budget_exceeded": "too many nodes",
+    "redundant_self_loop": "duplicate self-loop",
+    "merge_rule_violation": "merge/instancing slip",
+    "quad_ids_missing_from_reason": "ids missing from reason",
+    "quad_ids_missing_from_related_object_ids": "ids missing from related list",
+    "reason_ids_missing_from_links": "reason/link gap",
+    "related_object_missing_detected_object": "stray reference",
+    "remaining_risk_object_missing_detected_object": "stray remaining-risk id",
+    "remaining_risk_state_mismatch": "remaining-risk state mismatch",
+    "duplicate_remaining_risk": "duplicate remaining-risk entry",
+}
+
+
+def failure_phrase(failure_type: str) -> str:
+    return FAILURE_PHRASE.get(failure_type, failure_type.replace("_", " "))
+
+
+def consequence_phrase(failure_type: str) -> str:
+    """Relatable consequence phrase for a failure (the locked category labels)."""
+    return CONSEQUENCE_LABEL.get(CONSEQUENCE_CATEGORY.get(failure_type, "no_effect"), "no real impact")
+
+
+def is_unknown_impact(failure_type: str) -> bool:
+    return CONSEQUENCE_CATEGORY.get(failure_type, "no_effect") == "unknown"
+
+
+def section_trust_sentence(passed: int, total: int, worst_category: str | None,
+                           worst_impact: float) -> str:
+    """One sentence: what this section's failures mean for TRUSTING its output,
+    built from the worst consequence + the pass stats."""
+    base = f"{passed} of {total} checks pass"
+    if not worst_category:
+        return base + " — nothing here harms the response, so this section is trustworthy."
+    phrase = CONSEQUENCE_LABEL.get(worst_category, "a problem")
+    if worst_impact >= 0.9:
+        verdict = "do not trust the recommendations here"
+    elif worst_impact >= 0.5:
+        verdict = "trust this section's output only with care"
+    elif worst_impact >= 0.2:
+        verdict = "mostly trustworthy, with some wasted effort"
+    else:
+        verdict = "trustworthy; only minor clutter"
+    return f"{base}, but the worst failures mean {phrase}, so {verdict}."
+
+
 CONSEQUENCE_SATURATION = 2.0  # Σ impact at which the internal penalty saturates
 
 
@@ -3803,19 +3971,24 @@ def consequence_score(error: str) -> float:
     return CONSEQUENCE_IMPACT.get(CONSEQUENCE_CATEGORY.get(error, "no_effect"), 0.0)
 
 
+# Relatable consequence phrase per category (the label users actually read).
 CONSEQUENCE_LABEL = {
-    "missed_rescue": "Missed rescue",
-    "misrouted_rescue": "Misrouted rescue",
-    "under_response": "Under-response",
-    "wasted_response": "Wasted response",
-    "slowed_response": "Slowed response",
+    "missed_rescue": "victim gets no help",
+    "misrouted_rescue": "help aimed the wrong way",
+    "under_response": "danger under-treated",
+    "wasted_response": "effort on a non-threat",
+    "slowed_response": "slower to act",
+    "no_effect": "no real impact",
+    "unknown": "unknown impact",
 }
 CONSEQUENCE_HEADLINE = {
     "missed_rescue": "A person in danger would get no help.",
     "misrouted_rescue": "Response would be aimed the wrong way — a victim treated as a threat, or an action targeting nothing.",
     "under_response": "A real danger is softened or dropped — too little, too late.",
     "wasted_response": "Effort would be spent on a non-threat — false alarm, alert fatigue.",
-    "slowed_response": "The brief is overloaded or garbled — slower action.",
+    "slowed_response": "The brief carries clutter the team must read past — slower triage.",
+    "no_effect": "Understood and harmless — bookkeeping or redundancy, no decision change.",
+    "unknown": "Reasoning we could not interpret — its cost is unknown, not zero; it lands on trust, not the victim ledger.",
 }
 
 
@@ -3903,22 +4076,31 @@ def consequence_verdict_for(errors: list[str]) -> dict[str, Any]:
     """One SECTION's verdict: map its errors to consequences (T3 model) and
     surface that section's worst, with pills per consequence category."""
     counts: dict[str, int] = {}
+    unknown_n = 0
     for e in errors:
         cat = CONSEQUENCE_CATEGORY.get(str(e), "no_effect")
+        if cat == "unknown":           # uninterpretable: flagged, not a victim cost
+            unknown_n += 1
+            continue
         if cat == "no_effect":
             continue
         counts[cat] = counts.get(cat, 0) + 1
+    unknown_pill = ([{"label": "unknown impact", "count": unknown_n, "color": "unknown",
+                      "tooltip": CONSEQUENCE_HEADLINE["unknown"]}] if unknown_n else [])
     if not counts:
-        return {"worst_category": None, "worst_impact": 0.0, "takeaway": "Clean.",
-                "pills": [{"label": "Clean", "count": 0, "color": "green", "tooltip": "No victim-cost failure."}]}
+        return {"worst_category": None, "worst_impact": 0.0,
+                "takeaway": ("Reasoning we could not interpret." if unknown_n
+                             else "Clean — no victim-cost failures."),
+                "pills": (unknown_pill or [{"label": "no victim-cost failures", "count": 0,
+                                            "color": "green", "tooltip": "Nothing here harms the response."}])}
     ordered = sorted(counts, key=lambda c: -CONSEQUENCE_IMPACT[c])
     worst = ordered[0]
     takeaway = f"{CONSEQUENCE_LABEL[worst]}. {CONSEQUENCE_HEADLINE[worst]}"
     if len(ordered) > 1:
-        takeaway += " Also: " + ", ".join(CONSEQUENCE_LABEL[c].lower() for c in ordered[1:]) + "."
+        takeaway += " Also: " + ", ".join(CONSEQUENCE_LABEL[c] for c in ordered[1:]) + "."
     pills = [{"label": CONSEQUENCE_LABEL[c], "count": counts[c],
               "color": consequence_color(CONSEQUENCE_IMPACT[c]), "tooltip": CONSEQUENCE_HEADLINE[c]}
-             for c in ordered]
+             for c in ordered] + unknown_pill
     return {"worst_category": worst, "worst_impact": CONSEQUENCE_IMPACT[worst],
             "takeaway": takeaway, "pills": pills}
 
@@ -5824,9 +6006,11 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
     # structural family). Priority #3 — flag the spurious-grounding ones.
     def consequence_pill(failure_type: str) -> html.Span:
         cat = CONSEQUENCE_CATEGORY.get(failure_type, "no_effect")
+        if cat == "unknown":  # uninterpretable: flagged, no weight asserted
+            return html.Span("unknown impact", className="cons-tag cons-unknown")
         imp = CONSEQUENCE_IMPACT.get(cat, 0.0)
-        label = CONSEQUENCE_LABEL.get(cat, "No effect")
-        return html.Span(f"{label} {imp:.1f}", className=f"cons-tag cons-{consequence_color(imp)}")
+        label = CONSEQUENCE_LABEL.get(cat, "no real impact")
+        return html.Span(f"{label} · {imp:.1f}", className=f"cons-tag cons-{consequence_color(imp)}")
 
     # Priority #2 — this section's verdict: the worst victim consequence among
     # its failures, composed exactly as the trust-card hierarchy does.
@@ -5872,16 +6056,27 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
         [
             html.Li(
                 [
+                    # Line 1 (plain): failure phrase → consequence phrase · weight.
                     html.Div(
                         [
+                            html.Span(failure_phrase(str(f.get("type", ""))),
+                                      className="failure-phrase-text",
+                                      title=consequence_explanation(str(f.get("type", "")))),
+                            html.Span(" → ", className="failure-arrow"),
                             consequence_pill(f.get("type", "")),
                             *([html.Span("spurious", className="cons-tag cons-spurious")]
                               if str(f.get("type", "")) in SPURIOUS_GROUNDING_RULES else []),
+                        ],
+                        className="failure-main-line",
+                    ),
+                    # Line 2 (muted, technical): the rule + message + family tag.
+                    html.Div(
+                        [
                             html.Span(f.get("type", "failure"), className="failure-type"),
                             html.Span(f" — {f.get('message', '')}", className="failure-message"),
                             severity_pill(f.get("type", "")),
                         ],
-                        className="failure-main-line",
+                        className="failure-tech-line",
                     ),
                     *(
                         [html.Div(failure_detail_text(f), className="failure-detail-line")]
@@ -5971,11 +6166,18 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
                 ],
                 className="consistency-score-row",
             ),
-            # Priority #2 — section verdict: what these failures cost a victim.
+            # Priority #2 — section verdict: pills + one trust sentence built from
+            # the worst consequence and the pass stats.
             html.Div(
                 [
-                    html.Div("What these failures cost (worst first)", className="trust-section-label"),
-                    *render_meaning_header(section_verdict),
+                    html.Div("What this section means for trust", className="trust-section-label"),
+                    *render_meaning_header({
+                        **section_verdict,
+                        "takeaway": section_trust_sentence(
+                            passed, total_checks,
+                            section_verdict.get("worst_category"),
+                            section_verdict.get("worst_impact", 0.0)),
+                    }),
                 ],
                 className="alignment-consequence-verdict",
             ),
@@ -10030,7 +10232,7 @@ def render_meaning_header(meaning: dict[str, Any]) -> list:
     if not meaning:
         return []
     pills = []
-    color_map = {"green": "pill-ok", "amber": "pill-warn", "orange": "pill-orange", "red": "pill-bad", "grey": "pill-neutral"}
+    color_map = {"green": "pill-ok", "amber": "pill-warn", "orange": "pill-orange", "red": "pill-bad", "grey": "pill-neutral", "unknown": "pill-unknown"}
     for p in meaning.get("pills", []):
         tip = p.get("tooltip", "")
         # CSS hover popup: a hidden child shown on :hover (immediate, styled,
@@ -11189,6 +11391,7 @@ app.index_string = """<!DOCTYPE html>
             .pill-ok { background: #dcfce7; color: #166534; }
             .pill-warn { background: #fef9c3; color: #854d0e; }
             .pill-orange { background: #ffedd5; color: #9a3412; }
+            .pill-unknown { background: #ede9fe; color: #5b21b6; border: 1px dashed #8b5cf6; }
             .pill-bad { background: #fee2e2; color: #991b1b; }
             .pill-neutral { background: #e2e8f0; color: #475569; }
             .cons-tag { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 10px; margin-right: 6px; white-space: nowrap; }
@@ -11197,6 +11400,13 @@ app.index_string = """<!DOCTYPE html>
             .cons-amber { background: #fef9c3; color: #854d0e; }
             .cons-grey { background: #e2e8f0; color: #475569; }
             .cons-spurious { background: #fce7f3; color: #9d174f; border: 1px dashed #db2777; }
+            .failure-consequence-text { color: #1e293b; font-size: 13px; }
+            .failure-phrase-text { color: #1e293b; font-size: 13px; font-weight: 600; }
+            .failure-arrow { color: #94a3b8; font-size: 12px; }
+            .cons-unknown { background: #ede9fe; color: #5b21b6; border: 1px dashed #8b5cf6; }
+            .failure-tech-line { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+            .failure-tech-line .failure-type { color: #64748b; font-family: monospace; }
+            .failure-tech-line .failure-message { color: #94a3b8; }
             .alignment-consequence-verdict { margin: 6px 0 10px; padding: 8px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
             .contrib-card { margin: 8px 0; padding: 8px 10px; background: #f8fafc; border-radius: 6px; }
             .contrib-bar { display: flex; width: 100%; height: 18px; border-radius: 4px; overflow: hidden; background: #eef2f7; margin: 4px 0 8px; }
