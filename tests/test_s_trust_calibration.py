@@ -263,6 +263,12 @@ def test_s12_verdict_persisted_in_normalized_result(main_module):
     assert cv["worst_category"] == "wasted_response"
     assert cv["context"]["spurious"]
 
+    # the four section meaning headers must be persisted too (whole meaning layer)
+    sm = norm.get("section_meanings")
+    assert sm is not None and set(sm) == {"reasoning", "conformance", "pathology", "accuracy"}
+    for name, meaning in sm.items():
+        assert "takeaway" in meaning and "pills" in meaning, f"{name} header malformed"
+
 
 @pytest.mark.blocking
 def test_s10_consequence_coverage_no_silent_zero(main_module):

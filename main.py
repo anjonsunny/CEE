@@ -3422,6 +3422,15 @@ def normalize_result(raw: dict[str, Any], image_contents: str | None = None) -> 
         at_risk_objects=result.get("at_risk_objects", []),
     )
 
+    # Per-section meaning headers (the one-liner + pills above each section).
+    # Persisted so the whole meaning layer is saved for run-to-run comparison.
+    result["section_meanings"] = {
+        "reasoning": generate_alignment_meaning(result["pre_internal_alignment"]),
+        "conformance": generate_conformance_meaning(result["rule_conformance"]),
+        "pathology": generate_pathology_meaning(result.get("pathologies", {})),
+        "accuracy": generate_accuracy_meaning(result.get("gt_validation", {}), result["rule_conformance"]),
+    }
+
     return result
 
 
@@ -7309,6 +7318,12 @@ def _process_one_image(
                 threats=result.get("threats", []),
                 at_risk_objects=result.get("at_risk_objects", []),
             )
+            result["section_meanings"] = {
+                "reasoning": generate_alignment_meaning(result.get("pre_internal_alignment", {})),
+                "conformance": generate_conformance_meaning(result["rule_conformance"]),
+                "pathology": generate_pathology_meaning(result.get("pathologies", {})),
+                "accuracy": generate_accuracy_meaning(result.get("gt_validation", {}), result["rule_conformance"]),
+            }
         except Exception:
             pass  # graph_b stays at placeholder
 
@@ -13454,10 +13469,12 @@ def render_results(
     pre_alignment_view = make_pre_internal_alignment_panel(normalized["pre_internal_alignment"])
     rule_conformance_view = make_rule_conformance_panel(normalized.get("rule_conformance", {}))
     # Meaning Generator from Failure: per-section takeaway + pills for the headers.
-    reasoning_meaning = render_meaning_header(generate_alignment_meaning(normalized.get("pre_internal_alignment", {})))
-    conformance_meaning = render_meaning_header(generate_conformance_meaning(normalized.get("rule_conformance", {})))
-    pathology_meaning = render_meaning_header(generate_pathology_meaning(normalized.get("pathologies", {})))
-    accuracy_meaning = render_meaning_header(generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
+    # Persisted in normalize_result; fall back to computing for old data.
+    sm = normalized.get("section_meanings") or {}
+    reasoning_meaning = render_meaning_header(sm.get("reasoning") or generate_alignment_meaning(normalized.get("pre_internal_alignment", {})))
+    conformance_meaning = render_meaning_header(sm.get("conformance") or generate_conformance_meaning(normalized.get("rule_conformance", {})))
+    pathology_meaning = render_meaning_header(sm.get("pathology") or generate_pathology_meaning(normalized.get("pathologies", {})))
+    accuracy_meaning = render_meaning_header(sm.get("accuracy") or generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
     # Persisted in normalize_result; fall back to computing if absent (old data).
     consequence_verdict = normalized.get("consequence_verdict") or generate_consequence_verdict(
         normalized.get("pre_internal_alignment", {}), normalized.get("rule_conformance", {}),
