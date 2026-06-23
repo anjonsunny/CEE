@@ -6184,20 +6184,6 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
             html.Div(
                 [
                     html.Div(
-                        [
-                            "Each failure is tagged by its victim consequence (",
-                            html.Span("missed", className="cons-tag cons-red"), " · ",
-                            html.Span("misrouted", className="cons-tag cons-red"), " · ",
-                            html.Span("under", className="cons-tag cons-orange"), " · ",
-                            html.Span("wasted", className="cons-tag cons-amber"), " · ",
-                            html.Span("slowed", className="cons-tag cons-grey"),
-                            "); ",
-                            html.Span("spurious", className="cons-tag cons-spurious"),
-                            " marks reliance on a non-hazard. Structural family (schema/consistency/duplication) is the small trailing tag.",
-                        ],
-                        className="alignment-note",
-                    ),
-                    html.Div(
                         f"Inferred entities: {'allowed' if alignment.get('allow_inferred') else 'not allowed'}",
                         className="alignment-note muted",
                     ),
