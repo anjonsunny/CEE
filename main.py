@@ -9168,6 +9168,64 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any],
     a_conf_validity = float(components.get("a_conformance_validity", 1.0) or 0.0)
     coverage_excluded = bool(components.get("coverage_excluded", False))
 
+    # ---- Contribution bar: how much each block fed the trust score, INCLUDING
+    # the sections that feed 0 (so a zero is visible, not just omitted). The four
+    # additive blocks sum to the score; conformance + β are multipliers shown as
+    # a note, not slices; the grey tail is trust not earned. -------------------
+    c_internal = internal_eff * w_internal
+    c_afid = a_fid * w_each
+    c_bcov = b_cov * w_each
+    c_cov = 0.0 if coverage_excluded else (cov_avg * 0.20)
+    contribs = [
+        ("Internal alignment", c_internal, "#3b82f6"),
+        ("A-fidelity", c_afid, "#14b8a6"),
+        ("B-coverage", c_bcov, "#8b5cf6"),
+        ("Threat coverage", c_cov, "#64748b"),
+    ]
+    total_contrib = c_internal + c_afid + c_bcov + c_cov
+    remainder = max(0.0, 1.0 - total_contrib)
+    bar_segs = [
+        html.Div(className="contrib-seg", title=f"{n}: {c:.3f}",
+                 style={"width": f"{c * 100:.1f}%", "background": col})
+        for n, c, col in contribs if c > 0.0005
+    ]
+    bar_segs.append(html.Div(className="contrib-seg contrib-remainder",
+                             title=f"Trust not earned: {remainder:.3f}",
+                             style={"width": f"{remainder * 100:.1f}%"}))
+    # contributors (with value) + sections that contribute exactly 0
+    zero_sections = [
+        ("Pathologies", "Computed from trust; feeds 0 back."),
+        ("GT / Test 1", "Headline excludes the answer key."),
+        ("Scene reading / objects", "Substrate, not a trust term."),
+        ("Suppression picks", "Sets up the intervention."),
+    ]
+    legend = [
+        html.Div([html.Span(className="contrib-swatch", style={"background": col}),
+                  html.Span(f"{n}", className="contrib-legend-name"),
+                  html.Span(f"{c:.3f}", className="contrib-legend-val")],
+                 className="contrib-legend-item")
+        for n, c, col in contribs
+    ] + [
+        html.Div([html.Span(className="contrib-swatch contrib-swatch-zero"),
+                  html.Span(n, className="contrib-legend-name contrib-zero"),
+                  html.Span("0.000", className="contrib-legend-val contrib-zero")],
+                 className="contrib-legend-item", title=why)
+        for n, why in zero_sections
+    ]
+    contrib_block = html.Div(
+        [
+            html.Div("What fed the trust score", className="trust-section-label"),
+            html.Div(bar_segs, className="contrib-bar"),
+            html.Div(legend, className="contrib-legend"),
+            html.Div(
+                f"Multipliers (not slices): Graph A conformance scales Internal ×{a_conf_validity:.2f}; "
+                f"Graph B validity β={beta:.2f} scales the agreement block.",
+                className="contrib-mult-note",
+            ),
+        ],
+        className="contrib-card",
+    )
+
     def main_row(name: str, value: float, weight: float, rationale: str) -> html.Div:
         return html.Div(
             [
@@ -9459,6 +9517,7 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any],
                 ],
                 className="trust-summary-card",
             ),
+            contrib_block,
             verdict_block,
             html.Div(
                 [
@@ -11106,6 +11165,18 @@ app.index_string = """<!DOCTYPE html>
             .pill-orange { background: #ffedd5; color: #9a3412; }
             .pill-bad { background: #fee2e2; color: #991b1b; }
             .pill-neutral { background: #e2e8f0; color: #475569; }
+            .contrib-card { margin: 8px 0; padding: 8px 10px; background: #f8fafc; border-radius: 6px; }
+            .contrib-bar { display: flex; width: 100%; height: 18px; border-radius: 4px; overflow: hidden; background: #eef2f7; margin: 4px 0 8px; }
+            .contrib-seg { height: 100%; }
+            .contrib-remainder { background: repeating-linear-gradient(45deg, #e2e8f0, #e2e8f0 4px, #edf1f6 4px, #edf1f6 8px); }
+            .contrib-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+            .contrib-legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+            .contrib-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+            .contrib-swatch-zero { background: #cbd5e1; border: 1px dashed #94a3b8; }
+            .contrib-legend-name { color: #334155; }
+            .contrib-legend-val { color: #0f172a; font-variant-numeric: tabular-nums; font-weight: 600; }
+            .contrib-zero { color: #94a3b8; font-weight: 400; }
+            .contrib-mult-note { font-size: 10.5px; color: #64748b; margin-top: 6px; font-style: italic; }
             .trust-verdict-block { margin: 8px 0; padding: 8px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
             .trust-verdict-sections > summary { cursor: pointer; font-size: 11px; font-weight: 600; color: #64748b; margin-top: 6px; }
             .trust-verdict-section { margin: 6px 0 0 8px; padding-left: 6px; border-left: 2px solid #e2e8f0; }

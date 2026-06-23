@@ -271,6 +271,40 @@ def test_s12_verdict_persisted_in_normalized_result(main_module):
 
 
 @pytest.mark.blocking
+def test_s14_trust_contribution_bar(main_module):
+    """The trust card's contribution bar: the 4 additive blocks sum to the score,
+    and the bar/legend shows the zero-contributors too (pathology etc.)."""
+    def text(n, acc):
+        ch = getattr(n, "children", None)
+        if isinstance(ch, str):
+            acc.append(ch)
+        elif isinstance(ch, (list, tuple)):
+            for c in ch:
+                text(c, acc)
+        elif ch is not None:
+            text(ch, acc)
+        return acc
+
+    for scene in ("push_06", "push_61", "push_14"):
+        sr = _load()[scene]
+        tr = _recompute(main_module, sr)
+        c = tr["components"]
+        ci = c["internal_effective"] * c["effective_internal_weight"]
+        we = c["effective_agreement_weight"] / 2.0
+        cov = 0.0 if c["coverage_excluded"] else (c["graph_a_coverage"] + c["graph_b_coverage"]) / 2.0 * 0.20
+        total = ci + c["a_fidelity"] * we + c["b_edge_coverage"] * we + cov
+        assert abs(total - tr["score"]) < 1e-6, f"{scene}: contributions {total} != score {tr['score']}"
+
+    panel = main_module.make_pre_intervention_trust_panel(_recompute(main_module, _load()["push_06"]))
+    blob = " ".join(text(panel, []))
+    assert "What fed the trust score" in blob
+    # zero-contributors are shown explicitly, not omitted
+    for z in ("Pathologies", "GT / Test 1", "Suppression picks"):
+        assert z in blob, f"zero-contributor {z} not shown in contribution bar"
+    assert "0.000" in blob
+
+
+@pytest.mark.blocking
 def test_s10_consequence_coverage_no_silent_zero(main_module):
     """Sweep regression-lock: every failure type/rule the system can emit must be
     mapped in CONSEQUENCE_CATEGORY, or it silently scores 0 impact (invisible to
