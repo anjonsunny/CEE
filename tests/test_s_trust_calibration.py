@@ -313,6 +313,51 @@ def test_s15_alignment_panel_consequence_first(main_module):
 
 
 @pytest.mark.blocking
+def test_s17_meaning_cards(main_module):
+    """Meaning hierarchies render as cards (count + weight, colored by consequence),
+    using meaning-card-* classes distinct from the neutral gb-trust cards."""
+    m = main_module
+
+    def classes(n, acc):
+        cn = getattr(n, "className", None)
+        if cn:
+            acc.append(cn)
+        ch = getattr(n, "children", None)
+        if isinstance(ch, (list, tuple)):
+            for c in ch:
+                classes(c, acc)
+        elif ch is not None and not isinstance(ch, str):
+            classes(ch, acc)
+        return acc
+
+    def text(n, acc):
+        if isinstance(n, str):
+            acc.append(n)
+            return acc
+        ch = getattr(n, "children", None)
+        if isinstance(ch, str):
+            acc.append(ch)
+        elif isinstance(ch, (list, tuple)):
+            for c in ch:
+                text(c, acc)
+        elif ch is not None:
+            text(ch, acc)
+        return acc
+
+    sv = m.consequence_verdict_for(["invalid_graph_edge", "at_risk_missing_detected_object",
+                                    "duplicate_recommendation_quad"])
+    cards = m.render_meaning_cards({**sv, "takeaway": "summary line here"})
+    cls = classes(cards, [])
+    blob = " ".join(text(cards, []))
+    assert any("meaning-card-row" in c for c in cls)
+    assert any(c.startswith("meaning-card meaning-card-") for c in cls)  # colored cards
+    assert not any("gb-trust" in c for c in cls)                        # NOT the Graph B class
+    assert "×1" in blob                                                  # count shown
+    assert "0.6" in blob                                                 # weight shown
+    assert "summary line here" in blob                                   # summary line
+
+
+@pytest.mark.blocking
 def test_s16_consequence_phrases_and_unknown_class(main_module):
     """The relatable consequence phrases, the brief failure phrases, and the new
     'unknown impact' class (uninterpretable garble: flagged, not a victim cost)."""

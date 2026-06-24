@@ -4086,7 +4086,7 @@ def consequence_verdict_for(errors: list[str]) -> dict[str, Any]:
             continue
         counts[cat] = counts.get(cat, 0) + 1
     unknown_pill = ([{"label": "unknown impact", "count": unknown_n, "color": "unknown",
-                      "tooltip": CONSEQUENCE_HEADLINE["unknown"]}] if unknown_n else [])
+                      "weight": None, "tooltip": CONSEQUENCE_HEADLINE["unknown"]}] if unknown_n else [])
     if not counts:
         return {"worst_category": None, "worst_impact": 0.0,
                 "takeaway": ("Reasoning we could not interpret." if unknown_n
@@ -4099,7 +4099,8 @@ def consequence_verdict_for(errors: list[str]) -> dict[str, Any]:
     if len(ordered) > 1:
         takeaway += " Also: " + ", ".join(CONSEQUENCE_LABEL[c] for c in ordered[1:]) + "."
     pills = [{"label": CONSEQUENCE_LABEL[c], "count": counts[c],
-              "color": consequence_color(CONSEQUENCE_IMPACT[c]), "tooltip": CONSEQUENCE_HEADLINE[c]}
+              "color": consequence_color(CONSEQUENCE_IMPACT[c]), "weight": CONSEQUENCE_IMPACT[c],
+              "tooltip": CONSEQUENCE_HEADLINE[c]}
              for c in ordered] + unknown_pill
     return {"worst_category": worst, "worst_impact": CONSEQUENCE_IMPACT[worst],
             "takeaway": takeaway, "pills": pills}
@@ -6172,7 +6173,7 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
             html.Div(
                 [
                     html.Div("What this section means for trust", className="trust-section-label"),
-                    *render_meaning_header({
+                    *render_meaning_cards({
                         **section_verdict,
                         "takeaway": section_trust_sentence(
                             passed, total_checks,
@@ -6216,7 +6217,7 @@ def make_reasoning_section_meaning(alignment: dict[str, Any]) -> html.Div:
             html.Div(
                 [
                     html.Div("Internal alignment", className="subsection-meaning-label"),
-                    *render_meaning_header({**sv, "takeaway": sentence}),
+                    *render_meaning_cards({**sv, "takeaway": sentence}),
                 ],
                 className="subsection-meaning",
             ),
@@ -9363,7 +9364,7 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any],
         for name, sv in (consequence_verdict.get("sections", {}) or {}).items():
             if sv.get("worst_category"):
                 section_rows.append(html.Div(
-                    [html.Div(name, className="trust-verdict-subname"), *render_meaning_header(sv)],
+                    [html.Div(name, className="trust-verdict-subname"), *render_meaning_cards(sv)],
                     className="trust-verdict-section",
                 ))
             else:
@@ -9375,7 +9376,7 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any],
         verdict_block = html.Div(
             [
                 html.Div("Bottom line — worst consequence", className="trust-section-label"),
-                *render_meaning_header(consequence_verdict),
+                *render_meaning_cards(consequence_verdict),
                 html.Details(
                     [html.Summary("By section"), *section_rows],
                     className="trust-verdict-sections",
@@ -10260,6 +10261,38 @@ def render_meaning_header(meaning: dict[str, Any]) -> list:
         out.append(html.Div(pills, className="meaning-pill-row"))
     if meaning.get("takeaway"):
         out.append(html.Div(meaning["takeaway"], className="meaning-takeaway"))
+    return out
+
+
+def render_meaning_cards(meaning: dict[str, Any]) -> list:
+    """Card-style rendering of a meaning hierarchy (mirrors the Graph-B trust
+    panel's card layout, but colored by consequence so the two never read alike).
+    Each consequence becomes a card: label + count + weight + plain caption; the
+    takeaway becomes the summary line below the row."""
+    if not meaning:
+        return []
+    cards = []
+    for p in meaning.get("pills", []):
+        color = p.get("color", "grey")
+        count = p.get("count", 0)
+        weight = p.get("weight", None)
+        stats = [html.Span(f"×{count}", className="meaning-card-count")]
+        if weight is not None:
+            stats.append(html.Span(f"{weight:.1f}", className="meaning-card-weight",
+                                   title="victim-cost weight"))
+        cards.append(html.Div(
+            [
+                html.Div(p.get("label", ""), className="meaning-card-label"),
+                html.Div(stats, className="meaning-card-value"),
+                html.Div(p.get("tooltip", ""), className="meaning-card-note"),
+            ],
+            className=f"meaning-card meaning-card-{color}",
+        ))
+    out = []
+    if cards:
+        out.append(html.Div(cards, className="meaning-card-row"))
+    if meaning.get("takeaway"):
+        out.append(html.Div(meaning["takeaway"], className="meaning-card-summary"))
     return out
 
 
@@ -12299,6 +12332,25 @@ app.index_string = """<!DOCTYPE html>
             .trust-low { color: #b91c1c; }
             /* --- Graph B trust panel (small, above the trust card) -------- */
             .gb-trust-panel { display: flex; flex-direction: column; gap: 10px; }
+            .meaning-card-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 8px; }
+            .meaning-card {
+                flex: 1 1 180px; min-width: 160px;
+                border: 1px solid #e2e8f0; border-left-width: 4px; border-radius: 8px;
+                padding: 10px 12px; background: #fdfdfe;
+            }
+            .meaning-card-label { font-size: 12px; font-weight: 700; color: #334155; }
+            .meaning-card-value { display: flex; align-items: baseline; gap: 8px; margin: 3px 0; }
+            .meaning-card-count { font-size: 22px; font-weight: 700; line-height: 1.1; color: #0f172a; }
+            .meaning-card-weight { font-size: 13px; font-weight: 700; padding: 1px 6px; border-radius: 10px; background: #f1f5f9; color: #475569; }
+            .meaning-card-note { font-size: 11px; color: #64748b; }
+            .meaning-card-summary { font-size: 12.5px; color: #1e293b; margin-top: 2px; }
+            /* consequence-colored left border + tint — distinguishes from the neutral Graph-B cards */
+            .meaning-card-red { border-left-color: #dc2626; background: #fef2f2; }
+            .meaning-card-orange { border-left-color: #ea580c; background: #fff7ed; }
+            .meaning-card-amber { border-left-color: #d97706; background: #fffbeb; }
+            .meaning-card-grey { border-left-color: #94a3b8; background: #f8fafc; }
+            .meaning-card-unknown { border-left-color: #8b5cf6; border-left-style: dashed; background: #f5f3ff; }
+            .meaning-card-green { border-left-color: #16a34a; background: #f0fdf4; }
             .gb-trust-metrics-row { display: flex; flex-wrap: wrap; gap: 12px; }
             .gb-trust-metric {
                 flex: 1 1 180px; min-width: 160px;
