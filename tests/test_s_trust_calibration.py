@@ -346,9 +346,12 @@ def test_s17_meaning_cards(main_module):
 
     sv = m.consequence_verdict_for(["invalid_graph_edge", "at_risk_missing_detected_object",
                                     "duplicate_recommendation_quad"])
-    cards = m.render_meaning_cards({**sv, "takeaway": "summary line here"})
-    cls = classes(cards, [])
-    blob = " ".join(text(cards, []))
+    cards = m.render_meaning_cards({**sv, "takeaway": "summary line here"})  # returns a list
+    cls, parts = [], []
+    for el in cards:
+        classes(el, cls)
+        text(el, parts)
+    blob = " ".join(parts)
     assert any("meaning-card-row" in c for c in cls)
     assert any(c.startswith("meaning-card meaning-card-") for c in cls)  # colored cards
     assert not any("gb-trust" in c for c in cls)                        # NOT the Graph B class
