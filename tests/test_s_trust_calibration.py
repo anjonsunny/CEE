@@ -361,6 +361,45 @@ def test_s17_meaning_cards(main_module):
 
 
 @pytest.mark.blocking
+def test_s18_ab_consistency_consequences(main_module):
+    """A↔B consistency: asymmetric mapping (B-side miss → under-treated, A-side
+    unconfirmed → unknown), effect-disagreement dedupe, and grounded matches."""
+    m = main_module
+    gc = {
+        "edge_diff": {
+            "only_in_a": [{"source": "house_1", "via_state": "burning", "effect": "may_harm", "target": "person_1"},
+                          # this pair is also an effect disagreement → must dedupe to NOT count here
+                          {"source": "house_2", "via_state": "burning", "effect": "may_harm", "target": "car_1"}],
+            "only_in_b": [{"source": "house_1", "via_state": "burning", "effect": "may_harm", "target": "car_1"},
+                          {"source": "house_2", "via_state": "burning", "effect": "may_spread_to", "target": "car_1"}],
+            "in_both": [{"source": "house_1", "via_state": "burning", "effect": "may_harm", "target": "house_2"}],
+        },
+        "effect_disagreements": [{"source": "house_2", "target": "car_1",
+                                  "graph_a_effects": ["may_harm"], "graph_b_effects": ["may_spread_to"]}],
+        "flag_agreement": [{"id": "house_1", "graph_a": True, "graph_b": True, "agree": True},
+                           {"id": "car_1", "graph_a": False, "graph_b": True, "agree": False}],
+    }
+    ab = m.enumerate_ab_consistency(gc)
+    types = [e["type"] for e in ab["errors"]]
+    # house_2→car_1 appears as effect-disputed ONCE, not as only_in_a AND only_in_b
+    assert types.count("ab_effect_disputed") == 1
+    assert "ab_edge_unconfirmed" in types          # only_in_a house_1→person_1 (B genuinely lacks)
+    assert "ab_edge_unaddressed" in types          # only_in_b house_1→car_1
+    assert "ab_flag_unaddressed" in types          # car_1: B hazard, A not
+    # consequences
+    assert m.consequence_score("ab_edge_unaddressed") == 0.6   # under-treated
+    assert m.is_unknown_impact("ab_edge_unconfirmed")          # unknown
+    assert m.is_unknown_impact("ab_effect_disputed")
+    # matches: grounded edge + agreed hazard
+    assert any(x["kind"] == "grounded_edge" for x in ab["matches"])
+    assert any(x["kind"] == "agreed_hazard" for x in ab["matches"])
+    # subsection meaning + verdict
+    meaning = m.make_ab_section_meaning(gc)
+    assert meaning["verdict"]["worst_category"] == "under_response"
+    assert "agree" in meaning["verdict"]["takeaway"]
+
+
+@pytest.mark.blocking
 def test_s16_consequence_phrases_and_unknown_class(main_module):
     """The relatable consequence phrases, the brief failure phrases, and the new
     'unknown impact' class (uninterpretable garble: flagged, not a victim cost)."""

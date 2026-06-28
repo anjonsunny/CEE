@@ -3778,6 +3778,15 @@ CONSEQUENCE_CATEGORY: dict[str, str] = {
     "threat_state_not_hazard_bearing": "wasted_response",
     # --- Slowed response (responder-facing clutter only) ---
     "duplicate_recommendation_quad": "slowed_response",  # duplicate action in the brief
+    # --- A↔B consistency disagreements (interpretation layer for the meaning
+    #     hierarchy; does NOT feed the score — a_fidelity/b_coverage already do).
+    #     Asymmetric: B (mechanism) sees a danger the recs ignore = real miss;
+    #     A claims something B doesn't confirm = unverified -> unknown. ---
+    "ab_edge_unaddressed": "under_response",   # only_in_b edge: mechanism danger the recs ignore
+    "ab_flag_unaddressed": "under_response",   # B flags a hazard the recs miss
+    "ab_edge_unconfirmed": "unknown",          # only_in_a edge: link B doesn't confirm
+    "ab_effect_disputed": "unknown",           # same link, A/B disagree on the harm mechanism
+    "ab_flag_unconfirmed": "unknown",          # A flags a hazard B doesn't confirm
     # --- Unknown impact (uninterpretable reasoning garble; not a victim cost,
     #     flagged separately, penalty lands on trust via conformance) ---
     "effect_not_in_vocabulary": "unknown",
@@ -3838,6 +3847,12 @@ CONSEQUENCE_EXPLANATION = {
     "recommendation_state_mismatch": "the action's stated condition doesn't match the entity, so it may address the wrong thing",
     "threat_state_mismatch": "the threat's state contradicts the detection, so the wrong hazard may be acted on",
     "threat_state_not_hazard_bearing": "a threat isn't in a hazardous state, so it's a non-threat drawing effort",
+    # A↔B consistency disagreements
+    "ab_edge_unaddressed": "the model's own mechanism shows this danger pathway, but no recommendation acts on it",
+    "ab_flag_unaddressed": "the mechanism flags this entity as a hazard, but the recommendations don't address it",
+    "ab_edge_unconfirmed": "the recommendations claim this link, but the independent mechanism graph doesn't back it; we can't tell if it's a real protective action or a fabrication, so it doesn't get a victim cost — it counts against trust instead",
+    "ab_effect_disputed": "both graphs see this link but disagree on how it harms; we can't tell which is right, so it counts against trust, not as a victim cost",
+    "ab_flag_unconfirmed": "the recommendations treat this as a hazard, but the mechanism doesn't confirm it; unverified, so it counts against trust, not as a victim cost",
     # slowed response (garbled / padded brief)
     "duplicate_recommendation_quad": "the same action is listed twice, padding the brief and slowing triage",
     "redundant_instancing": "the same thing is modeled twice, cluttering the brief",
@@ -3908,6 +3923,12 @@ FAILURE_PHRASE = {
     "threat_state_not_hazard_bearing": "threat isn't hazardous",
     # slower to act
     "duplicate_recommendation_quad": "duplicate action",
+    # A↔B consistency disagreements
+    "ab_edge_unaddressed": "danger link the recs ignore",
+    "ab_flag_unaddressed": "hazard the recs miss",
+    "ab_edge_unconfirmed": "link not confirmed by mechanism",
+    "ab_effect_disputed": "disputed harm mechanism",
+    "ab_flag_unconfirmed": "hazard not confirmed by mechanism",
     # unknown impact (uninterpretable)
     "effect_not_in_vocabulary": "unknown effect label",
     "out_of_vocabulary_state": "unknown state word",
@@ -3942,6 +3963,113 @@ def consequence_phrase(failure_type: str) -> str:
 
 def is_unknown_impact(failure_type: str) -> bool:
     return CONSEQUENCE_CATEGORY.get(failure_type, "no_effect") == "unknown"
+
+
+def _fmt_ab_edge(e: dict[str, Any]) -> str:
+    return (f"{e.get('source', '?')} —[{e.get('effect', '?')} | via:{e.get('via_state', '?')}]→ "
+            f"{e.get('target', '?')}")
+
+
+def enumerate_ab_consistency(gc: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Turn the A↔B consistency diff into typed ERRORS (each → a consequence) and
+    MATCHES (positive, grounded). Asymmetric: B-side commitments the recs ignore
+    are real misses; A-side claims B doesn't confirm are unverified (unknown).
+    Effect disagreements are deduped out of the only-in-A/only-in-B edge lists so
+    a harm-label mismatch is counted once, not three times."""
+    ed = gc.get("edge_diff", {}) or {}
+    only_a = ed.get("only_in_a", []) or []
+    only_b = ed.get("only_in_b", []) or []
+    in_both = ed.get("in_both", []) or []
+    disagreements = gc.get("effect_disagreements", []) or []
+    flags = gc.get("flag_agreement", []) or []
+    disputed = {(str(d.get("source", "")), str(d.get("target", ""))) for d in disagreements}
+
+    errors: list[dict[str, Any]] = []
+    for d in disagreements:
+        errors.append({"type": "ab_effect_disputed",
+                       "detail": f"{d.get('source', '?')} → {d.get('target', '?')}: "
+                                 f"A {','.join(d.get('graph_a_effects', []))} vs "
+                                 f"B {','.join(d.get('graph_b_effects', []))}"})
+    for e in only_b:
+        if (str(e.get("source", "")), str(e.get("target", ""))) in disputed:
+            continue
+        errors.append({"type": "ab_edge_unaddressed", "detail": _fmt_ab_edge(e)})
+    for e in only_a:
+        if (str(e.get("source", "")), str(e.get("target", ""))) in disputed:
+            continue
+        errors.append({"type": "ab_edge_unconfirmed", "detail": _fmt_ab_edge(e)})
+    for f in flags:
+        if f.get("agree"):
+            continue
+        if f.get("graph_b") and not f.get("graph_a"):
+            errors.append({"type": "ab_flag_unaddressed", "detail": f"{f.get('id')}: B flags hazard, A does not"})
+        elif f.get("graph_a") and not f.get("graph_b"):
+            errors.append({"type": "ab_flag_unconfirmed", "detail": f"{f.get('id')}: A flags hazard, B does not"})
+
+    matches: list[dict[str, Any]] = []
+    for e in in_both:
+        matches.append({"kind": "grounded_edge", "detail": _fmt_ab_edge(e),
+                        "meaning": "grounded — the recommendation rests on the model's own mechanism (confirmed by Graph B)"})
+    for f in flags:
+        if f.get("agree") and f.get("graph_a"):  # both mark it hazardous
+            matches.append({"kind": "agreed_hazard", "detail": str(f.get("id")),
+                            "meaning": "agreed hazard — both graphs flag this entity as dangerous"})
+    return {"errors": errors, "matches": matches}
+
+
+def make_ab_section_meaning(consistency: dict[str, Any]) -> dict[str, Any]:
+    """A↔B subsection higher-level meaning: the worst-consequence verdict + a
+    grounding-framed trust sentence, plus the raw errors/matches for the panel."""
+    ab = enumerate_ab_consistency(consistency)
+    errors, matches = ab["errors"], ab["matches"]
+    sv = consequence_verdict_for([str(e["type"]) for e in errors])
+    n_err, n_match = len(errors), len(matches)
+    worst = sv.get("worst_category")
+    if not worst and not n_err:
+        sentence = (f"{n_match} causal commitment(s) agree and none diverge — the recommendations "
+                    "are grounded in the model's own mechanism." if n_match
+                    else "Nothing to compare between the two graphs.")
+    elif not worst:  # only unknown-impact divergences
+        sentence = (f"{n_err} commitment(s) diverge but none is a clear victim cost ({n_match} agree); "
+                    "the gaps land on trust, not the response.")
+    else:
+        phrase = CONSEQUENCE_LABEL.get(worst, "a problem")
+        verdict = ("trust the recommendations' grounding only with care"
+                   if sv.get("worst_impact", 0.0) >= 0.5 else "mostly grounded, only minor gaps")
+        sentence = f"{n_match} agree, {n_err} diverge; the worst gap means {phrase}, so {verdict}."
+    return {"verdict": {**sv, "takeaway": sentence}, "errors": errors, "matches": matches}
+
+
+def render_ab_low_level(errors: list[dict[str, Any]], matches: list[dict[str, Any]]) -> Any:
+    """Low-level A↔B rows: matches first (green, grounded), then errors
+    (failure phrase → consequence · weight), each with the edge as a muted line."""
+    rows: list[Any] = []
+    for mt in matches:
+        rows.append(html.Li([
+            html.Div([html.Span("grounded", className="cons-tag cons-green"),
+                      html.Span(mt.get("meaning", ""), className="failure-phrase-text")],
+                     className="failure-main-line"),
+            html.Div(mt.get("detail", ""), className="failure-tech-line"),
+        ]))
+    for e in errors:
+        t = str(e["type"])
+        cat = CONSEQUENCE_CATEGORY.get(t, "no_effect")
+        if cat == "unknown":
+            pill = html.Span("unknown impact", className="cons-tag cons-unknown")
+        else:
+            imp = consequence_score(t)
+            pill = html.Span(f"{CONSEQUENCE_LABEL[cat]} · {imp:.1f}",
+                             className=f"cons-tag cons-{consequence_color(imp)}")
+        rows.append(html.Li([
+            html.Div([html.Span(failure_phrase(t), className="failure-phrase-text",
+                                title=consequence_explanation(t)),
+                      html.Span(" → ", className="failure-arrow"), pill],
+                     className="failure-main-line"),
+            html.Div(e.get("detail", ""), className="failure-tech-line"),
+        ]))
+    if not rows:
+        rows = [html.Li("No causal commitments to compare.", className="diff-empty")]
+    return html.Ul(rows, className="diff-ul alignment-failure-list")
 
 
 def section_trust_sentence(passed: int, total: int, worst_category: str | None,
@@ -5775,12 +5903,13 @@ def make_consistency_panel(consistency: dict[str, Any]) -> html.Div:
         )
 
     score_subtext = {
-        "A-fidelity": "Recs' edges that B also claims. Low = fabrication.",
-        "B-coverage": "B's edges that recs act on. Low = under-recommendation.",
+        "A-fidelity": "Recs' links the mechanism also asserts. Low = not mechanism-confirmed (unknown impact).",
+        "B-coverage": "Mechanism links the recs act on. Low = danger left unaddressed (under-treated).",
         "Topological": "Same source→target, effect ignored.",
         "Node": "Same entities in A and B.",
         "Hazardous flag": "Same entities marked hazardous.",
     }
+    ab_meaning = make_ab_section_meaning(consistency)
 
     def score_card(label: str, value: float) -> html.Div:
         # color the score by band
@@ -5798,54 +5927,6 @@ def make_consistency_panel(consistency: dict[str, Any]) -> html.Div:
             ],
             className="consistency-score-card",
         )
-
-    node_diff = consistency.get("node_diff", {})
-    edge_diff = consistency.get("edge_diff", {})
-    effect_disagreements = consistency.get("effect_disagreements", [])
-    flags = consistency.get("flag_agreement", [])
-
-    def diff_list(title: str, items: list[Any], formatter, empty_text: str = "(none)") -> html.Div:
-        if not items:
-            return html.Div(
-                [html.Div(title, className="diff-list-title"), html.Div(empty_text, className="diff-empty")],
-                className="diff-list",
-            )
-        return html.Div(
-            [
-                html.Div(f"{title} ({len(items)})", className="diff-list-title"),
-                html.Ul([html.Li(formatter(it)) for it in items], className="diff-ul"),
-            ],
-            className="diff-list",
-        )
-
-    edge_fmt = lambda e: f"{e.get('source')} —[{e.get('effect')} | via:{e.get('via_state')}]→ {e.get('target')}"
-    node_fmt = lambda nid: nid
-    effect_fmt = lambda e: (
-        f"{e.get('source')} → {e.get('target')}: "
-        f"A={', '.join(e.get('graph_a_effects', [])) or '∅'}; "
-        f"B={', '.join(e.get('graph_b_effects', [])) or '∅'}"
-    )
-
-    # Flag disagreements only — agreements are noise
-    disagreements = [f for f in flags if not f["agree"]]
-    flag_block = html.Div(
-        [
-            html.Div(f"Hazardous-flag disagreements ({len(disagreements)})", className="diff-list-title"),
-            html.Div("Same node, different hazardous=True/False.", className="diff-help-text"),
-            (
-                html.Ul(
-                    [
-                        html.Li(f"{f['id']}: A={f['graph_a']}, B={f['graph_b']}")
-                        for f in disagreements
-                    ],
-                    className="diff-ul",
-                )
-                if disagreements
-                else html.Div("None; shared nodes have matching hazardous flags.", className="diff-empty")
-            ),
-        ],
-        className="diff-list",
-    )
 
     return html.Div(
         [
@@ -5872,11 +5953,20 @@ def make_consistency_panel(consistency: dict[str, Any]) -> html.Div:
                                 "Note: this measures self-consistency, NOT correctness. The model could be self-consistent and still wrong about the world; for that, see the External Validation card.",
                             ]),
                             html.P([
-                                html.B("Reading the scores: "),
-                                html.B("A-fidelity "), "= fraction of A's edges that B also asserts. Low = model recommends actions based on causal claims it doesn't independently endorse (fabrication). ",
-                                html.B("B-coverage "), "= fraction of B's edges that A's recommendations act on. Low = model believes in threats it didn't recommend acting on (under-recommendation). ",
-                                html.B("Topological "), "= same source→target structure regardless of effect label. ",
-                                html.B("Node / Hazardous flag "), "= same entities present and same hazardous=true/false agreement.",
+                                html.B("Reading it: "),
+                                "Each link-by-link disagreement is shown as an error → its consequence. "
+                                "The mapping is asymmetric, because B is the mechanistic yardstick: a danger "
+                                "link B asserts that the recommendations ignore is a real miss → ",
+                                html.B("danger under-treated"),
+                                "; a link the recommendations claim that B doesn't confirm is unverified "
+                                "(could be a real action or a fabrication, we can't tell from here) → ",
+                                html.B("unknown impact"),
+                                ", which lands on trust, not the victim. Agreements are shown green = ",
+                                html.B("grounded"),
+                                " (the recommendation rests on the model's own mechanism). ",
+                                html.B("B-coverage"), " carries the under-treated gap, ",
+                                html.B("A-fidelity"), " the unknown gap; the other metrics are diagnostic. "
+                                "This measures self-consistency, NOT correctness.",
                             ], style={"marginBottom": "0"}),
                         ],
                         className="gt-val-explainer-body",
@@ -5885,6 +5975,16 @@ def make_consistency_panel(consistency: dict[str, Any]) -> html.Div:
                 className="gt-val-explainer",
                 style={"marginBottom": "10px"},
             ),
+            # Higher-level meaning (verdict card) — top, like Internal Alignment.
+            html.Div(
+                [
+                    html.Div("What this section means for trust", className="trust-section-label"),
+                    *render_meaning_cards(ab_meaning["verdict"]),
+                ],
+                className="alignment-consequence-verdict",
+            ),
+            # Groupwise metrics (B-coverage carries under-treated; A-fidelity carries
+            # unknown). Captions reframed; the four overlap metrics are diagnostic.
             html.Div(
                 [
                     score_card("A-fidelity", consistency.get("a_fidelity", 0.0)),
@@ -5895,41 +5995,13 @@ def make_consistency_panel(consistency: dict[str, Any]) -> html.Div:
                 ],
                 className="consistency-score-row",
             ),
+            # Low-level: each disagreement as an error → consequence; matches green.
             html.Div(
                 [
-                    diff_list(
-                        "Nodes only in A (recs)",
-                        node_diff.get("only_in_a", []),
-                        node_fmt,
-                        "None; A adds no extra entities.",
-                    ),
-                    diff_list(
-                        "Nodes only in B (VLM graph)",
-                        node_diff.get("only_in_b", []),
-                        node_fmt,
-                        "None; B adds no extra entities.",
-                    ),
-                    diff_list(
-                        "Edges only in A (recs)",
-                        edge_diff.get("only_in_a", []),
-                        edge_fmt,
-                        "None; A adds no unique causal edges.",
-                    ),
-                    diff_list(
-                        "Edges only in B (VLM graph)",
-                        edge_diff.get("only_in_b", []),
-                        edge_fmt,
-                        "None; B adds no unique causal edges.",
-                    ),
-                    diff_list(
-                        "Effect disagreements",
-                        effect_disagreements,
-                        effect_fmt,
-                        "None; shared source-target links use the same effect.",
-                    ),
-                    flag_block,
+                    html.Div("Link-by-link: agreements and disagreements", className="trust-section-label"),
+                    render_ab_low_level(ab_meaning["errors"], ab_meaning["matches"]),
                 ],
-                className="diff-grid",
+                className="diff-list alignment-failures",
             ),
         ],
         className="consistency-panel",
@@ -6202,28 +6274,36 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
     )
 
 
-def make_reasoning_section_meaning(alignment: dict[str, Any]) -> html.Div:
+def make_reasoning_section_meaning(alignment: dict[str, Any],
+                                   consistency: dict[str, Any] | None = None) -> html.Div:
     """Higher-level meaning at the TOP of the 'Is the reasoning sound?' section:
-    one labeled block per subsection (its trust sentence + consequence pills),
-    replacing the old self-incoherent pattern line. Currently surfaces Internal
-    Alignment; A↔B Consistency joins here when that subsection is converted."""
+    one labeled block per subsection (its trust sentence + consequence cards),
+    replacing the old self-incoherent pattern line. Surfaces Internal Alignment
+    and, when present, A↔B Consistency."""
     passed = int(alignment.get("passed_checks", 0) or 0)
     failed = int(alignment.get("failed_checks", 0) or 0)
     total = passed + failed
     sv = consequence_verdict_for([str(f.get("type", "")) for f in (alignment.get("failures", []) or [])])
     sentence = section_trust_sentence(passed, total, sv.get("worst_category"), sv.get("worst_impact", 0.0))
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.Div("Internal alignment", className="subsection-meaning-label"),
-                    *render_meaning_cards({**sv, "takeaway": sentence}),
-                ],
-                className="subsection-meaning",
-            ),
-        ],
-        className="reasoning-section-meaning",
-    )
+    blocks = [
+        html.Div(
+            [
+                html.Div("Internal alignment", className="subsection-meaning-label"),
+                *render_meaning_cards({**sv, "takeaway": sentence}),
+            ],
+            className="subsection-meaning",
+        ),
+    ]
+    if consistency:
+        ab = make_ab_section_meaning(consistency)
+        blocks.append(html.Div(
+            [
+                html.Div("A↔B consistency", className="subsection-meaning-label"),
+                *render_meaning_cards(ab["verdict"]),
+            ],
+            className="subsection-meaning",
+        ))
+    return html.Div(blocks, className="reasoning-section-meaning")
 
 
 def make_suppression_panel(
@@ -11444,6 +11524,7 @@ app.index_string = """<!DOCTYPE html>
             .cons-amber { background: #fef9c3; color: #854d0e; }
             .cons-grey { background: #e2e8f0; color: #475569; }
             .failure-phrase-text { color: #1e293b; font-size: 13px; font-weight: 600; }
+            .cons-green { background: #dcfce7; color: #166534; }
             .failure-arrow { color: #94a3b8; font-size: 12px; }
             .cons-unknown { background: #ede9fe; color: #5b21b6; border: 1px dashed #8b5cf6; }
             .failure-tech-line { font-size: 11px; color: #94a3b8; margin-top: 2px; }
@@ -13851,7 +13932,8 @@ def render_results(
     sm = normalized.get("section_meanings") or {}
     # Reasoning header now surfaces the subsection higher-level meaning (trust
     # sentence + consequence pills), not the old self-incoherent pattern.
-    reasoning_meaning = make_reasoning_section_meaning(normalized.get("pre_internal_alignment", {}))
+    reasoning_meaning = make_reasoning_section_meaning(
+        normalized.get("pre_internal_alignment", {}), normalized.get("graph_consistency", {}))
     conformance_meaning = render_meaning_header(sm.get("conformance") or generate_conformance_meaning(normalized.get("rule_conformance", {})))
     pathology_meaning = render_meaning_header(sm.get("pathology") or generate_pathology_meaning(normalized.get("pathologies", {})))
     accuracy_meaning = render_meaning_header(sm.get("accuracy") or generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
