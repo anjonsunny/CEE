@@ -275,6 +275,11 @@ def test_s12_verdict_persisted_in_normalized_result(main_module):
     for name, meaning in sm.items():
         assert "takeaway" in meaning and "pills" in meaning, f"{name} header malformed"
 
+    # the A↔B consistency meaning (verdict + errors + matches) must be persisted
+    ab = norm.get("ab_consistency_meaning")
+    assert ab is not None and set(ab) >= {"verdict", "errors", "matches"}
+    assert "takeaway" in ab["verdict"]
+
 
 @pytest.mark.blocking
 def test_s15_alignment_panel_consequence_first(main_module):

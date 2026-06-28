@@ -3422,6 +3422,10 @@ def normalize_result(raw: dict[str, Any], image_contents: str | None = None) -> 
         at_risk_objects=result.get("at_risk_objects", []),
     )
 
+    # A↔B consistency meaning (verdict + errors + matches), persisted so the
+    # whole meaning layer — not just the raw graph_consistency — is in the JSON.
+    result["ab_consistency_meaning"] = make_ab_section_meaning(result.get("graph_consistency", {}))
+
     # Per-section meaning headers (the one-liner + pills above each section).
     # Persisted so the whole meaning layer is saved for run-to-run comparison.
     result["section_meanings"] = {
@@ -7638,6 +7642,7 @@ def _process_one_image(
                 threats=result.get("threats", []),
                 at_risk_objects=result.get("at_risk_objects", []),
             )
+            result["ab_consistency_meaning"] = make_ab_section_meaning(result.get("graph_consistency", {}))
             result["section_meanings"] = {
                 "reasoning": generate_alignment_meaning(result.get("pre_internal_alignment", {})),
                 "conformance": generate_conformance_meaning(result["rule_conformance"]),
