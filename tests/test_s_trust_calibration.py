@@ -366,6 +366,45 @@ def test_s17_meaning_cards(main_module):
 
 
 @pytest.mark.blocking
+def test_s24_batch_groundedness_card(main_module):
+    """The batch top card: groundedness profile + standout + ML hypotheses and
+    candidate mitigations (incl. the alignment-track lever)."""
+    m = main_module
+
+    def text(n, acc):
+        if isinstance(n, str):
+            acc.append(n)
+            return acc
+        ch = getattr(n, "children", None)
+        if isinstance(ch, str):
+            acc.append(ch)
+        elif isinstance(ch, (list, tuple)):
+            for c in ch:
+                text(c, acc)
+        elif ch is not None:
+            text(ch, acc)
+        return acc
+
+    runs = []
+    for sr in _load().values():
+        r = dict(sr)
+        r["disaster_scenario"] = "Yes"
+        runs.append(r)
+    rep = m.compute_pre_intervention_report(runs)
+    blob = " ".join(text(m.make_batch_groundedness_card(rep), []))
+    assert "How grounded is the model?" in blob
+    assert "danger under-treated" in blob                 # standout consequence
+    assert "Top drivers:" in blob
+    assert "Likely ML cause:" in blob and "Candidate fix:" in blob   # ML hypothesis + mitigation
+    assert "shift signals as reward" in blob              # the alignment-track lever
+    # every consequence category + pathology has an ML hypothesis/mitigation entry
+    for cat in m.CONSEQUENCE_ML_HYPOTHESIS.values():
+        assert cat["hypothesis"] and cat["mitigation"]
+    for k in m.PATHOLOGY_REGISTRY:
+        assert k in m.PATHOLOGY_MITIGATION
+
+
+@pytest.mark.blocking
 def test_s23_batch_consequence_rollup(main_module):
     """Batch report aggregates the single-run synthesis: worst-consequence
     distribution, convergence distribution, GT-corroboration rate, top drivers."""

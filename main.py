@@ -3917,6 +3917,42 @@ CONSEQUENCE_EXPLANATION = {
 }
 
 
+# Standout consequence pattern -> plausible ML hypothesis + candidate mitigation
+# (HYPOTHESES, not proven — the bridge to the alignment track). Refine later.
+CONSEQUENCE_ML_HYPOTHESIS = {
+    "missed_rescue": {
+        "hypothesis": "the model drops victims that don't match a high-probability template (a second victim, an off-center person), a rung-1 retrieval failure rather than reasoning over who is present",
+        "mitigation": "augment with multi-victim and atypical-victim scenes; add a coverage objective that every detected person is accounted for; CEE+ shift signals as reward",
+    },
+    "misrouted_rescue": {
+        "hypothesis": "weak victim-vs-threat role separation — the model conflates the source of harm with who is harmed (a victim read as a threat)",
+        "mitigation": "role-labeled training with explicit victim/threat/hazard distinctions; contrastive pairs that flip the role on the same entity",
+    },
+    "under_response": {
+        "hypothesis": "rung-1 pattern-matching (scene → template action) instead of reasoning from the hazard, so real but non-template dangers — diffuse media (water, smoke), spread, secondary hazards — get under-modeled or dropped",
+        "mitigation": "counterfactual / intervention-based training using CEE+'s own shift signals as reward; augment with diffuse-hazard and cascade scenes; add hazard-state grounding objectives",
+    },
+    "wasted_response": {
+        "hypothesis": "weak perception anchoring — the model asserts hazards/victims it never grounded in detected entities (over-firing / fabrication, often a safety-biased prior)",
+        "mitigation": "perception grounding: require every threat/at-risk to anchor to a detected object; penalize ungrounded entities; calibrate the occupancy prior to evidence",
+    },
+    "slowed_response": {
+        "hypothesis": "redundant / padded output — the decoder repeats structure rather than compressing by causal sameness",
+        "mitigation": "dedup/merge objective; penalize redundant instancing; lower-stakes, a formatting fix more than a reasoning one",
+    },
+}
+
+# Per-pathology candidate ML mitigation (the ml_mechanism in the registry is the
+# hypothesis; this is the lever). HYPOTHESES, not proven.
+PATHOLOGY_MITIGATION = {
+    "sycophancy": "adjust the RLHF reward so agreement isn't paid for; calibrate answers to the evidence, not the question's framing",
+    "rationalized_minimization": "penalize hedging that buries a real signal; reward calibrated risk statements over balanced-sounding ones",
+    "truth_suppression": "remove social-desirability bias from the reward; state hazards plainly regardless of the entity's sensitivity",
+    "tribal_mirroring": "audience-invariance objective — same scene must yield the same threat level regardless of who is asking",
+    "safety_theater": "make refusals content-based, not phrasing-based; adversarial reword training so a rephrase can't unlock the same output",
+}
+
+
 def consequence_explanation(failure_type: str) -> str:
     """Plain-language 'what this failure does' for a failure type, victim-framed."""
     if failure_type in CONSEQUENCE_EXPLANATION:
@@ -8764,6 +8800,76 @@ def make_gt_validation_panel(gt_validation: dict[str, Any]) -> html.Div:
     )
 
 
+def make_batch_groundedness_card(report: dict[str, Any]) -> html.Div:
+    """Batch top card: combine every single-run synthesis into one reading of how
+    grounded the model is — population evidence, what stands out, and the most
+    plausible ML causes + candidate mitigations (hypotheses, the bridge to the
+    alignment track)."""
+    cr = (report or {}).get("consequence_rollup") or {}
+    n = int(cr.get("n_runs", 0) or 0)
+    if not n:
+        return html.Div()
+    worst_dist = cr.get("worst_distribution", {}) or {}
+    conv = cr.get("convergence_distribution", {}) or {}
+    gt_rate = float(cr.get("gt_corroborated_rate", 0.0) or 0.0)
+    core_rate = float(cr.get("core_missed_rate", 0.0) or 0.0)
+    spur_rate = float(cr.get("spurious_rate", 0.0) or 0.0)
+    top_drivers = cr.get("top_drivers", []) or []
+    n_full = int(conv.get(4, 0) or 0)
+    dominant = max(worst_dist, key=lambda k: worst_dist[k]) if worst_dist else None
+
+    if dominant:
+        d_n = worst_dist[dominant]
+        profile = (f"Across {n} scenes, the standout consequence is {CONSEQUENCE_LABEL[dominant]} "
+                   f"in {d_n} ({d_n / n:.0%}); {n_full} scene(s) show full agreement across all four "
+                   f"checks, and the verified answer key corroborates the failure in {gt_rate:.0%} of "
+                   f"flagged scenes. The model misses the core hazard in {core_rate:.0%} and leans on "
+                   f"spurious features in {spur_rate:.0%}. Pre-intervention, this is the groundedness "
+                   "evidence — the intervention confirms operative grounding.")
+    else:
+        profile = (f"Across {n} scenes, no section flags a victim-cost issue — the model's reasoning "
+                   "looks grounded pre-intervention.")
+    driver_line = ("Top drivers: " + ", ".join(f"{d} ({c}×)" for d, c in top_drivers[:4]) + "."
+                   if top_drivers else "")
+
+    def ml_block(title: str, hypothesis: str, mitigation: str) -> html.Div:
+        return html.Div(
+            [
+                html.Div(title, className="batch-ml-title"),
+                html.Div([html.Span("Likely ML cause: ", className="batch-ml-label"), html.Span(hypothesis)],
+                         className="batch-ml-row"),
+                html.Div([html.Span("Candidate fix: ", className="batch-ml-label"), html.Span(mitigation)],
+                         className="batch-ml-row"),
+            ],
+            className="batch-ml-block",
+        )
+
+    ml_blocks = []
+    if dominant and dominant in CONSEQUENCE_ML_HYPOTHESIS:
+        h = CONSEQUENCE_ML_HYPOTHESIS[dominant]
+        ml_blocks.append(ml_block(f"Dominant consequence — {CONSEQUENCE_LABEL[dominant]} ({worst_dist[dominant]}/{n})",
+                                  h["hypothesis"], h["mitigation"]))
+    path_summary = {e["key"]: e for e in ((report or {}).get("pathology_rollup", {}) or {}).get("summary", [])}
+    for e in sorted([x for x in path_summary.values() if x.get("fired", 0) > 0],
+                    key=lambda x: -x["fired"])[:3]:
+        k = e["key"]
+        entry = PATHOLOGY_REGISTRY.get(k, {})
+        ml_blocks.append(ml_block(f"{entry.get('label', k)} (fired in {e['fired']}/{n})",
+                                  entry.get("ml_mechanism", ""), PATHOLOGY_MITIGATION.get(k, "")))
+
+    return html.Div(
+        [
+            html.Div("How grounded is the model? — combined across all runs", className="trust-section-label"),
+            html.Div(profile, className="trust-synthesis-text"),
+            html.Div(driver_line, className="batch-driver-line") if driver_line else html.Div(),
+            html.Div("Most plausible ML causes & mitigations (hypotheses, not proven)",
+                     className="trust-section-label", style={"marginTop": "10px"}),
+            *ml_blocks,
+        ],
+        className="trust-synthesis-card batch-groundedness-card",
+    )
+
+
 def make_pre_intervention_report_panel(
     report: dict[str, Any],
     skipped: list[dict[str, str]] | None = None,
@@ -9319,6 +9425,8 @@ def make_pre_intervention_report_panel(
     )
 
     children = [header, explainer]
+    # Top card: the population-level groundedness synthesis + ML hypotheses.
+    children.append(make_batch_groundedness_card(report))
     if interpretation_block is not None:
         children.append(interpretation_block)
     children.extend([
@@ -11935,6 +12043,12 @@ app.index_string = """<!DOCTYPE html>
             .trust-verdict-block { margin: 8px 0; padding: 8px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
             .trust-synthesis-card { margin: 8px 0; padding: 10px 12px; border-left: 4px solid #7c3aed; background: #faf5ff; border-radius: 6px; }
             .trust-synthesis-text { font-size: 13px; color: #1e293b; margin-top: 6px; line-height: 1.5; }
+            .batch-groundedness-card { border-left-color: #7c3aed; }
+            .batch-driver-line { font-size: 12px; color: #475569; margin-top: 4px; }
+            .batch-ml-block { margin: 6px 0; padding: 6px 10px; background: #fff; border: 1px solid #e9d5ff; border-radius: 6px; }
+            .batch-ml-title { font-size: 12.5px; font-weight: 700; color: #6b21a8; }
+            .batch-ml-row { font-size: 12px; color: #1e293b; margin-top: 2px; }
+            .batch-ml-label { font-weight: 700; color: #7c3aed; }
             .trust-verdict-sections > summary { cursor: pointer; font-size: 11px; font-weight: 600; color: #64748b; margin-top: 6px; }
             .trust-verdict-section { margin: 6px 0 0 8px; padding-left: 6px; border-left: 2px solid #e2e8f0; }
             .trust-verdict-subname { font-size: 11px; font-weight: 700; color: #475569; }
