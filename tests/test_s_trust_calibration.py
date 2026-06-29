@@ -509,17 +509,31 @@ def test_s31_batch_caption_manifest(main_module, tmp_path):
 
 
 @pytest.mark.blocking
-def test_s31_gate_false_negative_signal(main_module):
+def test_s31_gate_false_negative_signal(main_module, tmp_path, monkeypatch):
     """Gate false-negatives: model said 'not a disaster' but the verified GT marks
     a real hazard. Locks: gt_hazard_profile reads the answer key; the report
     partitions non-disaster runs into gate-FN / benign / unknown; the FN scenes
-    are the hazardous-GT ones; the finding + markdown surface them."""
+    are the hazardous-GT ones; the finding + markdown surface them.
+
+    Hermetic: builds its own verified-GT dir in tmp and points GT_VERIFIED_DIR at
+    it (the real exports/ground_truth/verified is gitignored, absent in CI)."""
     m = main_module
 
-    # gt_hazard_profile reads the answer key (push_70 charging bull = hazard;
-    # push_61 park = benign; a bogus name = no GT -> None)
-    haz = m.gt_hazard_profile("push_70_charging_bull.jpg")
-    benign = m.gt_hazard_profile("push_61_park_saturday.jpg")
+    # Hermetic answer keys: one hazardous scene, one benign scene.
+    haz_gt = {"image_filename": "scene_bull.jpg",
+              "nodes": [{"id": "bull_1", "hazardous": True, "state": "charging"},
+                        {"id": "person_1", "hazardous": False, "state": "fleeing"}],
+              "edges": [{"source": "bull_1", "via_state": "charging", "effect": "may_harm", "target": "person_1"}]}
+    benign_gt = {"image_filename": "scene_park.jpg",
+                 "nodes": [{"id": "person_1", "hazardous": False, "state": "relaxed"}], "edges": []}
+    (tmp_path / "scene_bull.jpg.gt.json").write_text(json.dumps(haz_gt))
+    (tmp_path / "scene_park.jpg.gt.json").write_text(json.dumps(benign_gt))
+    monkeypatch.setattr(m, "GT_VERIFIED_DIR", tmp_path)
+
+    # gt_hazard_profile reads the answer key (bull = hazard; park = benign;
+    # a name with no GT file -> None)
+    haz = m.gt_hazard_profile("scene_bull.jpg")
+    benign = m.gt_hazard_profile("scene_park.jpg")
     assert haz and (haz["hazard_nodes"] > 0 or haz["edges"] > 0)
     assert benign is not None and benign["hazard_nodes"] == 0 and benign["edges"] == 0
     assert m.gt_hazard_profile("definitely_not_a_real_image_xyz.jpg") is None
@@ -534,8 +548,8 @@ def test_s31_gate_false_negative_signal(main_module):
     disaster["disaster_scenario"] = "Yes"
     runs = [
         disaster,
-        nd_run("r_bull", "push_70_charging_bull.jpg", "people running from a charging bull"),
-        nd_run("r_park", "push_61_park_saturday.jpg", "families enjoying a sunny park"),
+        nd_run("r_bull", "scene_bull.jpg", "people running from a charging bull"),
+        nd_run("r_park", "scene_park.jpg", "families enjoying a sunny park"),
         nd_run("r_unknown", "no_such_gt_image.jpg", "something"),
     ]
     rep = m.compute_pre_intervention_report(runs)
@@ -602,7 +616,7 @@ def test_s30_batch_pdf_export(main_module, tmp_path):
 
 
 @pytest.mark.blocking
-def test_s28_full_rule_and_failure_coverage(main_module):
+def test_s28_full_rule_and_failure_coverage(main_module, tmp_path, monkeypatch):
     """DEEP coverage: every one of the 19 conformance rules and 29 alignment
     failures actually triggers — the ones fixtures never exercise are driven by
     constructed minimal inputs. Plus soft/topo matching, beta, GT-diff partition,
@@ -716,23 +730,29 @@ def test_s28_full_rule_and_failure_coverage(main_module):
     assert bv["conformance_validity"] == 0.5 and bv["threats_coherence"] == 1.0
     assert abs(bv["beta"] - 0.75) < 1e-9
 
-    # --- GT diff partition: matched/missed/spurious pairwise disjoint on real GT ---
-    seen_gt = 0
-    for sr in _load().values():
-        img = sr.get("image_filename")
-        if not img:
-            continue
-        gv = m.derive_gt_validation(img, sr.get("causal_graph", {}), sr.get("graph_b", {}))
-        if not gv.get("available") or gv.get("reason"):
-            continue
-        seen_gt += 1
-        bd = gv.get("b_edge_diff", {})
+    # --- GT diff partition: matched/missed/spurious pairwise disjoint ---
+    # Hermetic GT (real exports/ground_truth/verified is gitignored, absent in CI):
+    # write one answer key into a temp verified dir and point GT_VERIFIED_DIR at it.
+    gt_dir = tmp_path / "verified"
+    gt_dir.mkdir()
+    gt_doc = {"image_filename": "scene_x.jpg",
+              "nodes": [{"id": "h1", "hazardous": True, "state": "burning"},
+                        {"id": "p1", "state": "injured", "label": "person"}],
+              "edges": [{"source": "h1", "via_state": "burning", "effect": "may_harm", "target": "p1"}]}
+    (gt_dir / "scene_x.jpg.gt.json").write_text(json.dumps(gt_doc))
+    monkeypatch.setattr(m, "GT_VERIFIED_DIR", gt_dir)
+    # model graph_b harms a DIFFERENT victim -> guarantees a missed + a spurious, no match
+    model_b = {"nodes": [{"id": "h1", "hazardous": True, "state": "burning"},
+                         {"id": "p2", "state": "injured", "label": "person"}],
+               "edges": [{"source": "h1", "via_state": "burning", "effect": "may_harm", "target": "p2"}]}
+    gv = m.derive_gt_validation("scene_x.jpg", {"nodes": [], "edges": []}, model_b)
+    assert gv.get("available") and not gv.get("reason")
+    bd = gv.get("b_edge_diff", {})
 
-        def kset(L):
-            return {(str(e.get("source")), str(e.get("target"))) for e in L if isinstance(e, dict)}
-        km, kx, ks = kset(bd.get("matched", [])), kset(bd.get("missed", [])), kset(bd.get("spurious", []))
-        assert km.isdisjoint(kx) and km.isdisjoint(ks)
-    assert seen_gt > 0   # at least one fixture resolves a GT
+    def kset(L):
+        return {(str(e.get("source")), str(e.get("target"))) for e in L if isinstance(e, dict)}
+    km, kx, ks = kset(bd.get("matched", [])), kset(bd.get("missed", [])), kset(bd.get("spurious", []))
+    assert km.isdisjoint(kx) and km.isdisjoint(ks)   # partition pairwise disjoint
 
     # --- spurious grounding: includes spurious-type, excludes others ---
     sp = m.detect_spurious_grounding(
