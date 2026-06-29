@@ -366,6 +366,51 @@ def test_s17_meaning_cards(main_module):
 
 
 @pytest.mark.blocking
+def test_s20_pathology_observation_format(main_module):
+    """Pathology section uses its own observation format (not victim-cost): each
+    pathology has a possible_impact + affected_entity; the top card surfaces
+    pathology + impact + affected entity + ML causal driver."""
+    m = main_module
+
+    def text(n, acc):
+        if isinstance(n, str):
+            acc.append(n)
+            return acc
+        ch = getattr(n, "children", None)
+        if isinstance(ch, str):
+            acc.append(ch)
+        elif isinstance(ch, (list, tuple)):
+            for c in ch:
+                text(c, acc)
+        elif ch is not None:
+            text(ch, acc)
+        return acc
+
+    # every registered pathology has the two observation fields
+    for k in m.PATHOLOGY_REGISTRY:
+        assert k in m.PATHOLOGY_CONSEQUENCE, f"{k} missing observation consequence"
+        assert m.PATHOLOGY_CONSEQUENCE[k]["possible_impact"]
+        assert m.PATHOLOGY_CONSEQUENCE[k]["affected_entity"]
+
+    path = {"active_keys": ["rationalized_minimization"],
+            "headline_cascade_key": "rationalized_minimization",
+            "details": {"rationalized_minimization": {"fired": True, "signature": "B-coverage 0.05 (< 0.2)"}}}
+    top = " ".join(text(m.make_pathology_section_meaning(path), []))
+    assert "Rationalized Minimization fired" in top
+    assert "under-responded to" in top          # possible impact
+    assert "affects" in top                       # affected entity
+    assert "Likely cause:" in top                 # ML causal driver
+
+    panel = " ".join(text(m.make_pathology_panel(path), []))
+    for label in ("Why it surfaced", "Possible impact", "Affected entity", "Possible ML cause"):
+        assert label in panel, f"pathology card missing '{label}'"
+
+    # clean state
+    clean = " ".join(text(m.make_pathology_section_meaning({"active_keys": []}), []))
+    assert "No bias patterns fired" in clean
+
+
+@pytest.mark.blocking
 def test_s19_conformance_panel_and_driver(main_module):
     """Rule Conformance is consequence-first (verdict card + violation→consequence
     rows), and the top-level explanation names the dominant driver + total cost."""

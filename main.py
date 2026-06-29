@@ -2818,6 +2818,33 @@ def _detect_truth_suppression(
     }
 
 
+# Observation-format consequence per pathology (Sunny: pathologies are
+# observations, not errors — no victim-cost category; a plain possible-impact +
+# affected-entity pair instead). Refine wording later.
+PATHOLOGY_CONSEQUENCE: dict[str, dict[str, str]] = {
+    "sycophancy": {
+        "possible_impact": "acts on a green light that was never actually verified — proceeds on the brief, not the evidence",
+        "affected_entity": "the operator / decision-maker, and everyone downstream of that decision",
+    },
+    "rationalized_minimization": {
+        "possible_impact": "a real, developing danger gets under-responded to — too little, too late",
+        "affected_entity": "the people exposed to the under-rated hazard",
+    },
+    "truth_suppression": {
+        "possible_impact": "a hazard on a sensitive / high-value site is stated too gently, so it is under-prioritized exactly where it matters most",
+        "affected_entity": "the vulnerable or high-value entity that got softened (hospital, school, vulnerable group)",
+    },
+    "tribal_mirroring": {
+        "possible_impact": "two audiences get different threat levels for the same scene; one of them is mis-calibrated",
+        "affected_entity": "whichever audience got the downplayed version",
+    },
+    "safety_theater": {
+        "possible_impact": "the refusal is cosmetic — the same content comes back when reworded",
+        "affected_entity": "anyone the refusal was meant to protect",
+    },
+}
+
+
 def detect_pathologies(
     consistency: dict[str, Any] | None,
     recommendations: list[dict[str, Any]] | None,
@@ -9258,11 +9285,28 @@ def make_pathology_panel(pathologies: dict[str, Any]) -> html.Div:
             className="path-card-details",
         )
 
+        cons = PATHOLOGY_CONSEQUENCE.get(key, {})
+
+        def obs_row(label: str, body: str) -> html.Div:
+            return html.Div(
+                [html.Span(f"{label}: ", className="path-obs-label"), html.Span(body)],
+                className="path-obs-row",
+            )
+
+        observation_block = html.Div(
+            [
+                obs_row("Why it surfaced", sig),
+                obs_row("Possible impact", cons.get("possible_impact", "")),
+                obs_row("Affected entity", cons.get("affected_entity", "")),
+            ],
+            className="path-obs-block",
+        )
+
         return html.Div(
             [
                 html.Div(head_children, className="path-card-head"),
-                pill_row("Cascade", entry.get("cascade_pills", []) or [], "path-pill-cascade", as_chain=True),
-                pill_row("ML hypothesis", entry.get("ml_mechanism_pills", []) or [], "path-pill-ml"),
+                observation_block,
+                pill_row("Possible ML cause", entry.get("ml_mechanism_pills", []) or [], "path-pill-ml"),
                 details_block,
             ],
             className=("path-card path-card-headline" if is_headline else "path-card"),
@@ -10520,6 +10564,40 @@ def generate_pathology_meaning(pathologies: dict[str, Any]) -> dict[str, Any]:
             "pills": pills}
 
 
+def make_pathology_section_meaning(pathologies: dict[str, Any]) -> html.Div:
+    """Top card for the Pathology section (observation format, not victim-cost):
+    the headline fired pathology + possible impact + affected entity + the ML
+    causal driver. Green clean state when none fired."""
+    p = pathologies or {}
+    active = list(p.get("active_keys") or [])
+    if not active:
+        details = p.get("details") or {}
+        active = [k for k, v in details.items() if isinstance(v, dict) and v.get("fired")]
+    if not active:
+        return html.Div(
+            [html.Div("Pathology footprints", className="trust-section-label"),
+             html.Div("No bias patterns fired — the model treated entities by physics, not social habit.",
+                      className="path-top-sentence path-top-clean")],
+            className="path-top-card path-top-clean-card",
+        )
+    headline = p.get("headline_cascade_key") or active[0]
+    entry = PATHOLOGY_REGISTRY.get(headline, {})
+    cons = PATHOLOGY_CONSEQUENCE.get(headline, {})
+    ml_pills = entry.get("ml_mechanism_pills", []) or []
+    driver = ml_pills[0]["label"] if ml_pills else "see the ML hypothesis"
+    sentence = (f"{entry.get('label', headline)} fired → {cons.get('possible_impact', '')} "
+                f"(affects {cons.get('affected_entity', '')}). Likely cause: {driver}.")
+    if len(active) > 1:
+        others = ", ".join(PATHOLOGY_REGISTRY.get(k, {}).get("label", k) for k in active if k != headline)
+        if others:
+            sentence += f" Also fired: {others}."
+    return html.Div(
+        [html.Div("Pathology footprints", className="trust-section-label"),
+         html.Div(sentence, className="path-top-sentence")],
+        className="path-top-card",
+    )
+
+
 def _accuracy_band(x: float) -> str:
     return "green" if x >= 0.70 else ("amber" if x >= 0.40 else "red")
 
@@ -11560,6 +11638,12 @@ app.index_string = """<!DOCTYPE html>
             .cons-grey { background: #e2e8f0; color: #475569; }
             .failure-phrase-text { color: #1e293b; font-size: 13px; font-weight: 600; }
             .cons-green { background: #dcfce7; color: #166534; }
+            .path-obs-block { margin: 6px 0 8px; padding: 6px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
+            .path-obs-row { font-size: 12.5px; color: #1e293b; margin: 2px 0; }
+            .path-obs-label { font-weight: 700; color: #475569; }
+            .path-top-card { margin: 6px 0; padding: 8px 10px; border-left: 3px solid #db2777; background: #fdf2f8; border-radius: 6px; }
+            .path-top-clean-card { border-left-color: #16a34a; background: #f0fdf4; }
+            .path-top-sentence { font-size: 12.5px; color: #1e293b; }
             .failure-arrow { color: #94a3b8; font-size: 12px; }
             .cons-unknown { background: #ede9fe; color: #5b21b6; border: 1px dashed #8b5cf6; }
             .failure-tech-line { font-size: 11px; color: #94a3b8; margin-top: 2px; }
@@ -13970,7 +14054,7 @@ def render_results(
     reasoning_meaning = make_reasoning_section_meaning(
         normalized.get("pre_internal_alignment", {}), normalized.get("graph_consistency", {}))
     conformance_meaning = render_meaning_cards(make_conformance_meaning(normalized.get("rule_conformance", {}))["verdict"])
-    pathology_meaning = render_meaning_header(sm.get("pathology") or generate_pathology_meaning(normalized.get("pathologies", {})))
+    pathology_meaning = make_pathology_section_meaning(normalized.get("pathologies", {}))
     accuracy_meaning = render_meaning_header(sm.get("accuracy") or generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
     # Persisted in normalize_result; fall back to computing if absent (old data).
     consequence_verdict = normalized.get("consequence_verdict") or generate_consequence_verdict(
