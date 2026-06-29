@@ -5278,11 +5278,56 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
         "companion_runs": companion_runs[:12],
     }
 
+    # Consequence rollup — the single-run synthesis aggregated across the set:
+    # how grounded the model is, with population evidence. (Sunny: combine all
+    # single-run insights into one.) Built from the saved per-run fields.
+    worst_dist: dict[str, int] = {}
+    driver_dist: dict[str, int] = {}
+    convergence_dist: dict[int, int] = {}
+    n_core_missed = n_spurious = n_gt_corroborated = n_with_worst = 0
+    syn_per_run: list[dict[str, Any]] = []
+    for r in runs:
+        s = compute_trust_synthesis(r)
+        wc = s.get("worst_category")
+        if wc:
+            n_with_worst += 1
+            worst_dist[wc] = worst_dist.get(wc, 0) + 1
+            if s.get("driver_phrase"):
+                driver_dist[s["driver_phrase"]] = driver_dist.get(s["driver_phrase"], 0) + 1
+            nc = int(s.get("n_convergence", 0))
+            convergence_dist[nc] = convergence_dist.get(nc, 0) + 1
+            if s.get("gt_corroborates"):
+                n_gt_corroborated += 1
+        if s.get("core_missed"):
+            n_core_missed += 1
+        if s.get("spurious"):
+            n_spurious += 1
+        syn_per_run.append({
+            "run_id": r.get("run_id", "?"),
+            "worst_category": wc,
+            "driver": s.get("driver_phrase", ""),
+            "n_convergence": s.get("n_convergence", 0),
+            "gt_corroborates": s.get("gt_corroborates", False),
+            "core_missed": s.get("core_missed", []),
+            "n_spurious": len(s.get("spurious", [])),
+        })
+    consequence_rollup = {
+        "n_runs": n_runs,
+        "worst_distribution": dict(sorted(worst_dist.items(), key=lambda kv: -CONSEQUENCE_IMPACT.get(kv[0], 0))),
+        "core_missed_rate": round(n_core_missed / n_runs, 3) if n_runs else 0.0,
+        "spurious_rate": round(n_spurious / n_runs, 3) if n_runs else 0.0,
+        "gt_corroborated_rate": round(n_gt_corroborated / n_with_worst, 3) if n_with_worst else 0.0,
+        "convergence_distribution": dict(sorted(convergence_dist.items())),
+        "top_drivers": sorted(driver_dist.items(), key=lambda kv: -kv[1])[:8],
+        "per_run": syn_per_run,
+    }
+
     return {
         "n_runs": n_runs,
         "n_runs_total": n_total,
         "n_runs_non_disaster": len(non_disaster_runs),
         "batch_rule_conformance": batch_rule_conformance,
+        "consequence_rollup": consequence_rollup,
         "family_rollup": family_rollup,
         "non_disaster_run_ids": [r.get("run_id", "?") for r in non_disaster_runs],
         "trust_distribution": trust_dist,
@@ -9621,13 +9666,11 @@ def make_graph_b_trust_panel(
     )
 
 
-def make_top_trust_synthesis(normalized: dict[str, Any]) -> html.Div:
-    """Top trust-card synthesis: combine every section's high-level meaning into
-    one reading. Logic: worst consequence wins the headline; convergence = how
-    many independent checks land on it (count, NOT summed cost — sections view
-    the same scene from different angles); the dominant driver; the pathology
-    flagged separately (observation, not a victim cost); the trust level decides
-    how to treat post-intervention shifts."""
+def compute_trust_synthesis(normalized: dict[str, Any]) -> dict[str, Any]:
+    """The DATA behind the trust-card synthesis (no rendering), reused by the
+    single-run card AND the batch aggregation. Worst consequence wins; convergence
+    = count of independent checks landing on it; dominant driver; pathology +
+    core-missed/spurious carried separately."""
     n = normalized or {}
     sec_verdicts = {
         "Internal alignment": consequence_verdict_for(
@@ -9636,6 +9679,35 @@ def make_top_trust_synthesis(normalized: dict[str, Any]) -> html.Div:
         "Rule conformance": make_conformance_meaning(n.get("rule_conformance", {}))["verdict"],
         "Accuracy (Test 1)": make_accuracy_meaning(n.get("gt_validation", {}))["verdict"],
     }
+    out: dict[str, Any] = {"sec_verdicts": sec_verdicts, "worst_category": None,
+                           "worst_section": "", "worst_impact": 0.0, "convergence": [],
+                           "n_convergence": 0, "gt_corroborates": False, "driver_phrase": ""}
+    scored = [(name, v) for name, v in sec_verdicts.items() if v.get("worst_category")]
+    if scored:
+        scored.sort(key=lambda nv: -nv[1].get("worst_impact", 0.0))
+        worst_name, worst_v = scored[0]
+        worst_cat = worst_v["worst_category"]
+        convergence = [nm for nm, v in sec_verdicts.items() if v.get("worst_category") == worst_cat]
+        out.update({"worst_category": worst_cat, "worst_section": worst_name,
+                    "worst_impact": worst_v.get("worst_impact", 0.0),
+                    "convergence": convergence, "n_convergence": len(convergence),
+                    "gt_corroborates": "Accuracy (Test 1)" in convergence,
+                    "driver_phrase": worst_v.get("driver_phrase", "")})
+    path = n.get("pathologies", {}) or {}
+    active = list(path.get("active_keys") or [])
+    out["pathologies"] = active
+    out["headline_pathology"] = path.get("headline_cascade_key") or (active[0] if active else None)
+    ctx = (n.get("consequence_verdict", {}) or {}).get("context", {}) or {}
+    out["core_missed"] = list(ctx.get("missed", []) or [])
+    out["spurious"] = list(ctx.get("spurious", []) or [])
+    return out
+
+
+def make_top_trust_synthesis(normalized: dict[str, Any]) -> html.Div:
+    """Render the single-run top-card synthesis (see compute_trust_synthesis for
+    the logic). Pathology surfaced separately; trust level → how to treat shifts."""
+    s = compute_trust_synthesis(normalized)
+    sec_verdicts = s["sec_verdicts"]
     color_map = {"green": "pill-ok", "amber": "pill-warn", "orange": "pill-orange",
                  "red": "pill-bad", "grey": "pill-neutral", "unknown": "pill-unknown"}
     chips = []
@@ -9644,35 +9716,26 @@ def make_top_trust_synthesis(normalized: dict[str, Any]) -> html.Div:
         lbl, col = (CONSEQUENCE_LABEL[wc], consequence_color(v.get("worst_impact", 0.0))) if wc else ("clean", "green")
         chips.append(html.Span(f"{name}: {lbl}", className=f"meaning-pill {color_map.get(col, 'pill-neutral')}"))
 
-    scored = [(name, v) for name, v in sec_verdicts.items() if v.get("worst_category")]
-    if not scored:
+    if not s["worst_category"]:
         standout = "No section flags a victim-cost issue — the baseline causal account is clean."
     else:
-        scored.sort(key=lambda nv: -nv[1].get("worst_impact", 0.0))
-        worst_name, worst_v = scored[0]
-        worst_cat = worst_v["worst_category"]
-        convergence = [nm for nm, v in sec_verdicts.items() if v.get("worst_category") == worst_cat]
-        n_conv, total = len(convergence), len(sec_verdicts)
-        gt_note = " (including the verified answer key)" if "Accuracy (Test 1)" in convergence else ""
+        n_conv, total = s["n_convergence"], len(sec_verdicts)
+        gt_note = " (including the verified answer key)" if s["gt_corroborates"] else ""
         lead = (f"{n_conv} of {total} independent checks{gt_note} converge on" if n_conv > 1
-                else f"{worst_name}{gt_note} flags")
-        driver = worst_v.get("driver_phrase", "")
-        standout = f"{lead} {CONSEQUENCE_LABEL[worst_cat]}"
-        if driver:
-            standout += f", driven by {driver}"
+                else f"{s['worst_section']}{gt_note} flags")
+        standout = f"{lead} {CONSEQUENCE_LABEL[s['worst_category']]}"
+        if s["driver_phrase"]:
+            standout += f", driven by {s['driver_phrase']}"
         standout += "."
 
-    # Pathology — surfaced separately (an observation, not a victim cost).
-    path = n.get("pathologies", {}) or {}
-    active = list(path.get("active_keys") or [])
     path_sentence = ""
-    if active:
-        hk = path.get("headline_cascade_key") or active[0]
+    if s.get("headline_pathology"):
+        hk = s["headline_pathology"]
         plabel = PATHOLOGY_REGISTRY.get(hk, {}).get("label", hk)
         pimp = PATHOLOGY_CONSEQUENCE.get(hk, {}).get("possible_impact", "")
         path_sentence = f" It also shows {plabel} — {pimp}."
 
-    trust = n.get("pre_intervention_trust", {}) or {}
+    trust = (normalized or {}).get("pre_intervention_trust", {}) or {}
     level = str(trust.get("level", "unknown"))
     score = float(trust.get("score", 0.0) or 0.0)
     treat = ("treat post-intervention shifts as strong evidence" if level == "high"

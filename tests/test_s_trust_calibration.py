@@ -366,6 +366,31 @@ def test_s17_meaning_cards(main_module):
 
 
 @pytest.mark.blocking
+def test_s23_batch_consequence_rollup(main_module):
+    """Batch report aggregates the single-run synthesis: worst-consequence
+    distribution, convergence distribution, GT-corroboration rate, top drivers."""
+    m = main_module
+    runs = []
+    for sr in _load().values():
+        r = dict(sr)
+        r["disaster_scenario"] = "Yes"
+        runs.append(r)
+    rep = m.compute_pre_intervention_report(runs)
+    cr = rep.get("consequence_rollup")
+    assert cr is not None, "batch report missing consequence_rollup"
+    assert set(cr) >= {"worst_distribution", "core_missed_rate", "spurious_rate",
+                       "gt_corroborated_rate", "convergence_distribution", "top_drivers", "per_run"}
+    # the shakedown set is dominated by under-treated danger
+    assert cr["worst_distribution"].get("under_response", 0) >= 5
+    # convergence distribution includes full 4-of-4 corroboration on some scenes
+    assert cr["convergence_distribution"].get(4, 0) >= 1
+    # GT corroboration is a 0..1 rate; top drivers ranked by count
+    assert 0.0 <= cr["gt_corroborated_rate"] <= 1.0
+    assert cr["top_drivers"] and cr["top_drivers"][0][1] >= cr["top_drivers"][-1][1]
+    assert len(cr["per_run"]) == len(runs)
+
+
+@pytest.mark.blocking
 def test_s22_top_trust_synthesis(main_module):
     """Top card synthesis: worst-wins headline, convergence by count (incl. GT
     flag), pathology surfaced separately, trust-level treatment."""
