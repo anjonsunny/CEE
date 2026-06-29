@@ -509,6 +509,60 @@ def test_s31_batch_caption_manifest(main_module, tmp_path):
 
 
 @pytest.mark.blocking
+def test_s31_gate_false_negative_signal(main_module):
+    """Gate false-negatives: model said 'not a disaster' but the verified GT marks
+    a real hazard. Locks: gt_hazard_profile reads the answer key; the report
+    partitions non-disaster runs into gate-FN / benign / unknown; the FN scenes
+    are the hazardous-GT ones; the finding + markdown surface them."""
+    m = main_module
+
+    # gt_hazard_profile reads the answer key (push_70 charging bull = hazard;
+    # push_61 park = benign; a bogus name = no GT -> None)
+    haz = m.gt_hazard_profile("push_70_charging_bull.jpg")
+    benign = m.gt_hazard_profile("push_61_park_saturday.jpg")
+    assert haz and (haz["hazard_nodes"] > 0 or haz["edges"] > 0)
+    assert benign is not None and benign["hazard_nodes"] == 0 and benign["edges"] == 0
+    assert m.gt_hazard_profile("definitely_not_a_real_image_xyz.jpg") is None
+
+    # Build three non-disaster runs: one hazardous-GT (gate FN), one benign-GT,
+    # one with no GT (unknown) — plus a disaster run so the report isn't empty.
+    def nd_run(rid, img, summary):
+        return {"run_id": rid, "image_filename": img, "disaster_scenario": "No",
+                "scene_summary": summary, "threats_and_risks": [], "recommendations": [],
+                "causal_graph": {"nodes": [], "edges": []}, "graph_b": {"nodes": [], "edges": []}}
+    disaster = m.normalize_result(dict(next(iter(_load().values()))))
+    disaster["disaster_scenario"] = "Yes"
+    runs = [
+        disaster,
+        nd_run("r_bull", "push_70_charging_bull.jpg", "people running from a charging bull"),
+        nd_run("r_park", "push_61_park_saturday.jpg", "families enjoying a sunny park"),
+        nd_run("r_unknown", "no_such_gt_image.jpg", "something"),
+    ]
+    rep = m.compute_pre_intervention_report(runs)
+    gfn = rep["gate_false_negatives"]
+    assert gfn["n_non_disaster"] == 3
+    assert gfn["n_gate_false_negative"] == 1          # only the bull
+    assert gfn["n_correctly_benign"] == 1             # the park
+    assert gfn["n_unknown_no_gt"] == 1                # no GT
+    # partition is exhaustive
+    assert (gfn["n_gate_false_negative"] + gfn["n_correctly_benign"]
+            + gfn["n_unknown_no_gt"]) == gfn["n_non_disaster"]
+    assert gfn["runs"][0]["run_id"] == "r_bull"
+    assert gfn["runs"][0]["gt_hazard_nodes"] > 0
+
+    # surfaced as a warning finding + a markdown section + a non-empty UI card
+    findings = m.interpret_pre_intervention_report(rep)
+    assert any("verified hazard" in f["headline"] and f["kind"] == "warning" for f in findings)
+    md = m.render_report_markdown(rep, findings, "fixtures")
+    assert "## ⚠ Gate false-negatives" in md and "r_bull" in md
+    assert m.make_gate_false_negative_card(rep).className.endswith("gate-fn-card")
+    # no FN -> empty card, no finding, no section
+    rep0 = m.compute_pre_intervention_report([disaster])
+    assert rep0["gate_false_negatives"]["n_gate_false_negative"] == 0
+    assert "## ⚠ Gate false-negatives" not in m.render_report_markdown(rep0, [], "x")
+
+
+@pytest.mark.blocking
 def test_s30_batch_pdf_export(main_module, tmp_path):
     """Batch report exports to PDF with the FULL consequence-first content. Locks:
     render_report_pdf returns valid PDF bytes; the markdown (PDF source) carries

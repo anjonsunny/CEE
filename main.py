@@ -5012,12 +5012,46 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
     non_disaster_runs = [r for r in runs if not is_disaster(r)]
     n_runs = len(disaster_runs)
 
+    # Gate false-negatives: the model classified the scene "not a disaster", but
+    # the verified GT marks a real hazard. These are catastrophic misses (the
+    # threat machinery never fired even though the danger is real) that the plain
+    # non-disaster count hides — and excluding them silently flatters the scored
+    # population, since they are the model's worst failures. Separated here from
+    # genuinely-benign non-disaster scenes (GT also has no hazard). Only runs with
+    # a verified GT can be adjudicated; the rest stay "unknown" and are not flagged.
+    gate_fn_runs: list[dict[str, Any]] = []
+    n_benign = n_unknown = 0
+    for r in non_disaster_runs:
+        prof = gt_hazard_profile(str(r.get("image_filename", "")))
+        if prof is None:
+            n_unknown += 1
+            continue
+        if prof["hazard_nodes"] > 0 or prof["edges"] > 0:
+            gate_fn_runs.append({
+                "run_id": r.get("run_id", "?"),
+                "image_filename": r.get("image_filename", ""),
+                "gt_hazard_nodes": prof["hazard_nodes"],
+                "gt_edges": prof["edges"],
+                "scene_summary": str(r.get("scene_summary", "")).strip()[:200],
+            })
+        else:
+            n_benign += 1
+    gate_fn_runs.sort(key=lambda d: -(d["gt_hazard_nodes"] + d["gt_edges"]))
+    gate_false_negatives = {
+        "n_non_disaster": len(non_disaster_runs),
+        "n_gate_false_negative": len(gate_fn_runs),
+        "n_correctly_benign": n_benign,
+        "n_unknown_no_gt": n_unknown,
+        "runs": gate_fn_runs,
+    }
+
     if n_runs == 0:
         return {
             "n_runs": 0,
             "n_runs_total": n_total,
             "n_runs_non_disaster": len(non_disaster_runs),
             "non_disaster_run_ids": [r.get("run_id", "?") for r in non_disaster_runs],
+            "gate_false_negatives": gate_false_negatives,
             "trust_distribution": {},
             "metric_distributions": {},
             "failure_histogram": [],
@@ -5362,6 +5396,7 @@ def compute_pre_intervention_report(runs: list[dict[str, Any]]) -> dict[str, Any
         "n_runs": n_runs,
         "n_runs_total": n_total,
         "n_runs_non_disaster": len(non_disaster_runs),
+        "gate_false_negatives": gate_false_negatives,
         "batch_rule_conformance": batch_rule_conformance,
         "consequence_rollup": consequence_rollup,
         "family_rollup": family_rollup,
@@ -6747,6 +6782,25 @@ def interpret_pre_intervention_report(report: dict[str, Any]) -> list[dict[str, 
             "detail": "Excluded from aggregation (no causal structure to evaluate). Aggregates below cover only disaster runs.",
         })
 
+    # 0b. Gate false-negatives — model said "not a disaster" but GT has a real
+    # hazard. The most severe class, and hidden inside the non-disaster count.
+    gfn = report.get("gate_false_negatives", {}) or {}
+    n_fn = int(gfn.get("n_gate_false_negative", 0) or 0)
+    if n_fn > 0:
+        examples = ", ".join(f"`{d['run_id']}`" for d in gfn.get("runs", [])[:4])
+        findings.append({
+            "kind": "warning",
+            "headline": f"{n_fn} scene(s) gated as non-disaster actually carry a verified hazard",
+            "detail": (
+                f"The model called these scenes 'not a disaster' and emitted zero threats, but the "
+                f"answer key marks a real hazard — the threat machinery never fired despite the danger. "
+                f"These are the model's most severe failures and, because the gate runs before scoring, "
+                f"they are excluded from the {n_runs} scored runs (which flatters the result). "
+                f"Distinct from {int(gfn.get('n_correctly_benign', 0))} genuinely-benign scene(s). "
+                f"Examples: {examples}."
+            ),
+        })
+
     md = report.get("metric_distributions", {}) or {}
     trust_dist = report.get("trust_distribution", {}) or {}
 
@@ -7001,6 +7055,31 @@ def render_report_markdown(
             lines.append(f"")
             lines.append(f"> {f.get('detail', '')}")
             lines.append("")
+
+    # Gate false-negatives — model said "not a disaster" but the verified GT has a
+    # real hazard. Surfaced prominently: these are catastrophic misses hidden in
+    # the non-disaster count, and excluding them flatters the scored population.
+    gfn = report.get("gate_false_negatives") or {}
+    if gfn.get("n_gate_false_negative", 0) > 0:
+        n_fn = gfn["n_gate_false_negative"]
+        n_nd = gfn.get("n_non_disaster", 0)
+        lines.append("## ⚠ Gate false-negatives (hazard real, but gated out)")
+        lines.append("")
+        lines.append(
+            f"**{n_fn} of {n_nd}** scenes the model called \"not a disaster\" actually carry a "
+            f"verified hazard in the answer key. The threat machinery never fired even though the "
+            f"danger is real — these are the model's most severe failures, and because the gate runs "
+            f"*before* scoring they are excluded from the {report.get('n_runs', 0)} scored runs above "
+            f"(which flatters the result). Distinct from the "
+            f"{gfn.get('n_correctly_benign', 0)} genuinely-benign no-hazard scene(s)."
+        )
+        lines.append("")
+        lines.append("| Run | GT hazards (nodes / edges) | Model's own scene summary |")
+        lines.append("|---|---|---|")
+        for d in gfn.get("runs", []):
+            summ = (d.get("scene_summary") or "").replace("|", "\\|")
+            lines.append(f"| `{d['run_id']}` | {d['gt_hazard_nodes']} / {d['gt_edges']} | {summ} |")
+        lines.append("")
 
     # Headline synthesis — how grounded the model is across the batch, plus the
     # ML-cause/mitigation hypotheses. Rendered from the SAME summary the UI card
@@ -7571,6 +7650,29 @@ def unverify_gt(original_path: str | Path) -> bool:
         verified_path.unlink()
         return True
     return False
+
+
+def gt_hazard_profile(image_filename: str) -> dict[str, int] | None:
+    """Hazard content of the verified GT answer key for an image, or None when no
+    verified GT exists. Used to separate genuinely-benign non-disaster runs (GT
+    has no hazard) from GATE FALSE-NEGATIVES (model said no-disaster but GT marks
+    a real hazard) — a catastrophic miss otherwise buried in the non-disaster
+    bucket. Independent of the model's own output; reads only the answer key."""
+    if not image_filename:
+        return None
+    gt_path = GT_VERIFIED_DIR / f"{image_filename}.gt.json"
+    if not gt_path.exists():
+        return None
+    try:
+        gt = json.loads(gt_path.read_text())
+    except Exception:
+        return None
+    nodes = gt.get("nodes") or []
+    edges = gt.get("edges") or []
+    return {
+        "hazard_nodes": sum(1 for n in nodes if n.get("hazardous")),
+        "edges": len(edges),
+    }
 
 
 def derive_gt_validation(
@@ -9025,6 +9127,50 @@ def make_batch_groundedness_card(report: dict[str, Any]) -> html.Div:
     )
 
 
+def make_gate_false_negative_card(report: dict[str, Any]) -> html.Div:
+    """Surface gate false-negatives: scenes the model called 'not a disaster' that
+    the verified GT marks as a real hazard. The most severe failure class, hidden
+    inside the non-disaster count and excluded from the scored population."""
+    gfn = (report or {}).get("gate_false_negatives") or {}
+    runs = gfn.get("runs") or []
+    if not runs:
+        return html.Div()
+    n_fn = len(runs)
+    n_scored = int(report.get("n_runs", 0) or 0)
+    rows = [
+        html.Tr([
+            html.Td(html.Code(d["run_id"]), className="gfn-run"),
+            html.Td(f"{d['gt_hazard_nodes']} / {d['gt_edges']}", className="gfn-haz"),
+            html.Td(d.get("scene_summary", ""), className="gfn-summary"),
+        ])
+        for d in runs
+    ]
+    return html.Div(
+        [
+            html.Div("⚠ Gate false-negatives — hazard real, but gated out", className="trust-section-label"),
+            html.Div(
+                f"{n_fn} scene(s) the model called “not a disaster” carry a verified hazard in the "
+                f"answer key — the threat machinery never fired even though the danger is real. Because the "
+                f"gate runs before scoring, these are excluded from the {n_scored} scored runs above, so the "
+                f"groundedness numbers are flattered by exactly the model's worst failures. Distinct from the "
+                f"{int(gfn.get('n_correctly_benign', 0))} genuinely-benign scene(s).",
+                className="trust-synthesis-text",
+            ),
+            html.Table(
+                [
+                    html.Thead(html.Tr([
+                        html.Th("Run"), html.Th("GT hazards (nodes / edges)"),
+                        html.Th("Model's own scene summary"),
+                    ])),
+                    html.Tbody(rows),
+                ],
+                className="gfn-table",
+            ),
+        ],
+        className="trust-synthesis-card gate-fn-card",
+    )
+
+
 def make_pre_intervention_report_panel(
     report: dict[str, Any],
     skipped: list[dict[str, str]] | None = None,
@@ -9582,6 +9728,8 @@ def make_pre_intervention_report_panel(
     children = [header, explainer]
     # Top card: the population-level groundedness synthesis + ML hypotheses.
     children.append(make_batch_groundedness_card(report))
+    # Severe-failure surfacing: gate false-negatives (hazard real, gated out).
+    children.append(make_gate_false_negative_card(report))
     if interpretation_block is not None:
         children.append(interpretation_block)
     children.extend([
@@ -12218,6 +12366,12 @@ app.index_string = """<!DOCTYPE html>
             .batch-ml-title { font-size: 12.5px; font-weight: 700; color: #6b21a8; }
             .batch-ml-row { font-size: 12px; color: #1e293b; margin-top: 2px; }
             .batch-ml-label { font-weight: 700; color: #7c3aed; }
+            .gate-fn-card { border-left-color: #dc2626; }
+            .gfn-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+            .gfn-table th, .gfn-table td { border: 1px solid #fecaca; padding: 4px 8px; text-align: left; vertical-align: top; }
+            .gfn-table th { background: #fef2f2; color: #991b1b; font-weight: 700; }
+            .gfn-haz { white-space: nowrap; font-weight: 700; color: #b91c1c; }
+            .gfn-summary { color: #1e293b; }
             .trust-verdict-sections > summary { cursor: pointer; font-size: 11px; font-weight: 600; color: #64748b; margin-top: 6px; }
             .trust-verdict-section { margin: 6px 0 0 8px; padding-left: 6px; border-left: 2px solid #e2e8f0; }
             .trust-verdict-subname { font-size: 11px; font-weight: 700; color: #475569; }
