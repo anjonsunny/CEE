@@ -9621,8 +9621,78 @@ def make_graph_b_trust_panel(
     )
 
 
+def make_top_trust_synthesis(normalized: dict[str, Any]) -> html.Div:
+    """Top trust-card synthesis: combine every section's high-level meaning into
+    one reading. Logic: worst consequence wins the headline; convergence = how
+    many independent checks land on it (count, NOT summed cost — sections view
+    the same scene from different angles); the dominant driver; the pathology
+    flagged separately (observation, not a victim cost); the trust level decides
+    how to treat post-intervention shifts."""
+    n = normalized or {}
+    sec_verdicts = {
+        "Internal alignment": consequence_verdict_for(
+            [str(f.get("type", "")) for f in (n.get("pre_internal_alignment", {}).get("failures", []) or [])]),
+        "A↔B consistency": make_ab_section_meaning(n.get("graph_consistency", {}))["verdict"],
+        "Rule conformance": make_conformance_meaning(n.get("rule_conformance", {}))["verdict"],
+        "Accuracy (Test 1)": make_accuracy_meaning(n.get("gt_validation", {}))["verdict"],
+    }
+    color_map = {"green": "pill-ok", "amber": "pill-warn", "orange": "pill-orange",
+                 "red": "pill-bad", "grey": "pill-neutral", "unknown": "pill-unknown"}
+    chips = []
+    for name, v in sec_verdicts.items():
+        wc = v.get("worst_category")
+        lbl, col = (CONSEQUENCE_LABEL[wc], consequence_color(v.get("worst_impact", 0.0))) if wc else ("clean", "green")
+        chips.append(html.Span(f"{name}: {lbl}", className=f"meaning-pill {color_map.get(col, 'pill-neutral')}"))
+
+    scored = [(name, v) for name, v in sec_verdicts.items() if v.get("worst_category")]
+    if not scored:
+        standout = "No section flags a victim-cost issue — the baseline causal account is clean."
+    else:
+        scored.sort(key=lambda nv: -nv[1].get("worst_impact", 0.0))
+        worst_name, worst_v = scored[0]
+        worst_cat = worst_v["worst_category"]
+        convergence = [nm for nm, v in sec_verdicts.items() if v.get("worst_category") == worst_cat]
+        n_conv, total = len(convergence), len(sec_verdicts)
+        gt_note = " (including the verified answer key)" if "Accuracy (Test 1)" in convergence else ""
+        lead = (f"{n_conv} of {total} independent checks{gt_note} converge on" if n_conv > 1
+                else f"{worst_name}{gt_note} flags")
+        driver = worst_v.get("driver_phrase", "")
+        standout = f"{lead} {CONSEQUENCE_LABEL[worst_cat]}"
+        if driver:
+            standout += f", driven by {driver}"
+        standout += "."
+
+    # Pathology — surfaced separately (an observation, not a victim cost).
+    path = n.get("pathologies", {}) or {}
+    active = list(path.get("active_keys") or [])
+    path_sentence = ""
+    if active:
+        hk = path.get("headline_cascade_key") or active[0]
+        plabel = PATHOLOGY_REGISTRY.get(hk, {}).get("label", hk)
+        pimp = PATHOLOGY_CONSEQUENCE.get(hk, {}).get("possible_impact", "")
+        path_sentence = f" It also shows {plabel} — {pimp}."
+
+    trust = n.get("pre_intervention_trust", {}) or {}
+    level = str(trust.get("level", "unknown"))
+    score = float(trust.get("score", 0.0) or 0.0)
+    treat = ("treat post-intervention shifts as strong evidence" if level == "high"
+             else "post-intervention shifts are usable, but interpret with caveats" if level == "moderate"
+             else "the baseline is incoherent, so treat post-intervention shifts as weak evidence")
+    trust_sentence = f" Baseline trust is {level} ({score:.2f}): {treat}."
+
+    return html.Div(
+        [
+            html.Div("The bottom line — combined across all sections", className="trust-section-label"),
+            html.Div(chips, className="meaning-pill-row"),
+            html.Div(standout + path_sentence + trust_sentence, className="trust-synthesis-text"),
+        ],
+        className="trust-synthesis-card",
+    )
+
+
 def make_pre_intervention_trust_panel(trust: dict[str, Any],
-                                      consequence_verdict: dict[str, Any] | None = None) -> html.Div:
+                                      consequence_verdict: dict[str, Any] | None = None,
+                                      synthesis: Any = None) -> html.Div:
     """Render baseline trust summary with explicit breakdown and meaning.
 
     Layout:
@@ -9706,35 +9776,37 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any],
     c_afid = a_fid * w_each
     c_bcov = b_cov * w_each
     c_cov = 0.0 if coverage_excluded else (cov_avg * 0.20)
+    # Each ingredient tied to the section it comes from.
     contribs = [
-        ("Internal alignment", c_internal, "#3b82f6"),
-        ("A-fidelity", c_afid, "#14b8a6"),
-        ("B-coverage", c_bcov, "#8b5cf6"),
-        ("Threat coverage", c_cov, "#64748b"),
+        ("Internal alignment", c_internal, "#3b82f6", "Internal Alignment"),
+        ("A-fidelity", c_afid, "#14b8a6", "A↔B Consistency"),
+        ("B-coverage", c_bcov, "#8b5cf6", "A↔B Consistency"),
+        ("Threat coverage", c_cov, "#64748b", "Graphs A/B"),
     ]
     total_contrib = c_internal + c_afid + c_bcov + c_cov
     remainder = max(0.0, 1.0 - total_contrib)
     bar_segs = [
-        html.Div(className="contrib-seg", title=f"{n}: {c:.3f}",
+        html.Div(className="contrib-seg", title=f"{n} (← {sec}): {c:.3f}",
                  style={"width": f"{c * 100:.1f}%", "background": col})
-        for n, c, col in contribs if c > 0.0005
+        for n, c, col, sec in contribs if c > 0.0005
     ]
     bar_segs.append(html.Div(className="contrib-seg contrib-remainder",
                              title=f"Trust not earned: {remainder:.3f}",
                              style={"width": f"{remainder * 100:.1f}%"}))
-    # contributors (with value) + sections that contribute exactly 0
+    # contributors (with value + source section) + sections that contribute exactly 0
     zero_sections = [
         ("Pathologies", "Computed from trust; feeds 0 back."),
-        ("GT / Test 1", "Headline excludes the answer key."),
+        ("GT / Test 1 (Accuracy)", "Headline excludes the answer key."),
         ("Scene reading / objects", "Substrate, not a trust term."),
         ("Suppression picks", "Sets up the intervention."),
     ]
     legend = [
         html.Div([html.Span(className="contrib-swatch", style={"background": col}),
-                  html.Span(f"{n}", className="contrib-legend-name"),
+                  html.Span(f"{n} ", className="contrib-legend-name"),
+                  html.Span(f"← {sec}", className="contrib-legend-src"),
                   html.Span(f"{c:.3f}", className="contrib-legend-val")],
                  className="contrib-legend-item")
-        for n, c, col in contribs
+        for n, c, col, sec in contribs
     ] + [
         html.Div([html.Span(className="contrib-swatch contrib-swatch-zero"),
                   html.Span(n, className="contrib-legend-name contrib-zero"),
@@ -10047,8 +10119,8 @@ def make_pre_intervention_trust_panel(trust: dict[str, Any],
                 ],
                 className="trust-summary-card",
             ),
+            (synthesis if synthesis is not None else verdict_block),
             contrib_block,
-            verdict_block,
             html.Div(
                 [
                     html.Div("Why this score", className="trust-section-label"),
@@ -11795,8 +11867,11 @@ app.index_string = """<!DOCTYPE html>
             .contrib-legend-name { color: #334155; }
             .contrib-legend-val { color: #0f172a; font-variant-numeric: tabular-nums; font-weight: 600; }
             .contrib-zero { color: #94a3b8; font-weight: 400; }
+            .contrib-legend-src { font-size: 10px; color: #94a3b8; font-style: italic; }
             .contrib-mult-note { font-size: 10.5px; color: #64748b; margin-top: 6px; font-style: italic; }
             .trust-verdict-block { margin: 8px 0; padding: 8px 10px; border-left: 3px solid #cbd5e1; background: #f8fafc; border-radius: 6px; }
+            .trust-synthesis-card { margin: 8px 0; padding: 10px 12px; border-left: 4px solid #7c3aed; background: #faf5ff; border-radius: 6px; }
+            .trust-synthesis-text { font-size: 13px; color: #1e293b; margin-top: 6px; line-height: 1.5; }
             .trust-verdict-sections > summary { cursor: pointer; font-size: 11px; font-weight: 600; color: #64748b; margin-top: 6px; }
             .trust-verdict-section { margin: 6px 0 0 8px; padding-left: 6px; border-left: 2px solid #e2e8f0; }
             .trust-verdict-subname { font-size: 11px; font-weight: 700; color: #475569; }
@@ -14194,7 +14269,8 @@ def render_results(
         threats=normalized.get("threats", []),
         at_risk_objects=normalized.get("at_risk_objects", []))
     pre_trust_view = make_pre_intervention_trust_panel(
-        normalized["pre_intervention_trust"], consequence_verdict=consequence_verdict)
+        normalized["pre_intervention_trust"], consequence_verdict=consequence_verdict,
+        synthesis=make_top_trust_synthesis(normalized))
     graph_b_trust_view = make_graph_b_trust_panel(
         normalized["pre_intervention_trust"],
         rule_conformance=normalized.get("rule_conformance", {}),

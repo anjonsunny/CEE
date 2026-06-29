@@ -366,6 +366,48 @@ def test_s17_meaning_cards(main_module):
 
 
 @pytest.mark.blocking
+def test_s22_top_trust_synthesis(main_module):
+    """Top card synthesis: worst-wins headline, convergence by count (incl. GT
+    flag), pathology surfaced separately, trust-level treatment."""
+    m = main_module
+
+    def text(n, acc):
+        if isinstance(n, str):
+            acc.append(n)
+            return acc
+        ch = getattr(n, "children", None)
+        if isinstance(ch, str):
+            acc.append(ch)
+        elif isinstance(ch, (list, tuple)):
+            for c in ch:
+                text(c, acc)
+        elif ch is not None:
+            text(ch, acc)
+        return acc
+
+    f = next(iter(FIXDIR.glob("shakedown_push_09_run_*.json")))
+    raw = dict(json.load(open(f))["structured_response"])
+    raw["caption"] = "A tanker is leaking oil and might explode because of the fire nearby"
+    norm = main_module.normalize_result(raw)
+    blob = " ".join(text(m.make_top_trust_synthesis(norm), []))
+    # per-section chips
+    assert "A↔B consistency:" in blob and "Accuracy (Test 1):" in blob
+    # convergence count + worst-wins + GT flag
+    assert "independent checks" in blob and "converge on" in blob
+    assert "danger under-treated" in blob
+    # trust treatment from the level
+    assert "Baseline trust is" in blob
+
+    # synthetic: pathology surfaced separately, not in the convergence count
+    norm2 = dict(norm)
+    norm2["pathologies"] = {"active_keys": ["rationalized_minimization"],
+                            "headline_cascade_key": "rationalized_minimization",
+                            "details": {"rationalized_minimization": {"fired": True, "signature": "x"}}}
+    blob2 = " ".join(text(m.make_top_trust_synthesis(norm2), []))
+    assert "It also shows Rationalized Minimization" in blob2
+
+
+@pytest.mark.blocking
 def test_s21_accuracy_vs_gt(main_module):
     """Accuracy / Test 1: reuse the diff machinery, NEW consequences vs GT (truth).
     missed → under-treated, fabricated → non-threat (confirmed, NOT unknown);
