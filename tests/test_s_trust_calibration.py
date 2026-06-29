@@ -366,6 +366,49 @@ def test_s17_meaning_cards(main_module):
 
 
 @pytest.mark.blocking
+def test_s19_conformance_panel_and_driver(main_module):
+    """Rule Conformance is consequence-first (verdict card + violation→consequence
+    rows), and the top-level explanation names the dominant driver + total cost."""
+    m = main_module
+
+    def text(n, acc):
+        if isinstance(n, str):
+            acc.append(n)
+            return acc
+        ch = getattr(n, "children", None)
+        if isinstance(ch, str):
+            acc.append(ch)
+        elif isinstance(ch, (list, tuple)):
+            for c in ch:
+                text(c, acc)
+        elif ch is not None:
+            text(ch, acc)
+        return acc
+
+    rc = {"violations": [
+        {"rule": "hazardous_node_no_edges", "graph": "graph_b", "detail": "house_1 has no edges"},
+        {"rule": "hazardous_node_no_edges", "graph": "graph_b", "detail": "house_2 has no edges"},
+        {"rule": "hazardous_node_no_edges", "graph": "graph_b", "detail": "house_3 has no edges"},
+        {"rule": "edge_from_non_hazardous", "graph": "graph_b", "detail": "car_1 -> x"},
+        {"rule": "via_state_mismatch", "graph": "graph_a", "detail": "weird via"},
+    ]}
+    # dominant driver = the most common type within the worst consequence
+    meaning = m.make_conformance_meaning(rc)
+    sv = meaning["verdict"]
+    assert sv["worst_category"] == "under_response"
+    assert sv["driver_phrase"] == "idle hazard (no effects)" and sv["driver_count"] == 3
+    assert "driven mostly by 'idle hazard (no effects)' (3×)" in sv["takeaway"]
+    assert "total victim cost" in sv["takeaway"]
+
+    blob = " ".join(text(m.make_rule_conformance_panel(rc), []))
+    assert "What this section means for trust" in blob          # verdict card
+    assert "Each violation and what it costs" in blob           # rows
+    assert "idle hazard (no effects)" in blob                   # failure phrase surfaced
+    assert "unknown impact" in blob                             # via_state_mismatch → unknown
+    assert "failure famil" not in blob                          # old family framing gone
+
+
+@pytest.mark.blocking
 def test_s18_ab_consistency_consequences(main_module):
     """A↔B consistency: asymmetric mapping (B-side miss → under-treated, A-side
     unconfirmed → unknown), effect-disagreement dedupe, and grounded matches."""
@@ -435,11 +478,15 @@ def test_s16_consequence_phrases_and_unknown_class(main_module):
     assert sv["worst_category"] is None
     assert any(p["color"] == "unknown" for p in sv["pills"])
 
-    # section trust sentence scales with the worst consequence
-    s_hi = m.section_trust_sentence(10, 20, "misrouted_rescue", 0.9)
-    s_mid = m.section_trust_sentence(10, 20, "under_response", 0.6)
-    s_clean = m.section_trust_sentence(20, 20, None, 0.0)
+    # section trust sentence scales with the worst consequence + names the driver
+    s_hi = m.section_trust_sentence(10, 20, {"worst_category": "misrouted_rescue", "worst_impact": 0.9,
+                                             "driver_phrase": "victim treated as threat", "driver_count": 2,
+                                             "total_cost": 1.8})
+    s_mid = m.section_trust_sentence(10, 20, {"worst_category": "under_response", "worst_impact": 0.6})
+    s_clean = m.section_trust_sentence(20, 20, {"worst_category": None, "worst_impact": 0.0})
     assert "do not trust" in s_hi
+    assert "driven mostly by 'victim treated as threat' (2×)" in s_hi   # dominant driver
+    assert "total victim cost" in s_hi
     assert "with care" in s_mid
     assert "trustworthy" in s_clean
 

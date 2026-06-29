@@ -4040,7 +4040,8 @@ def make_ab_section_meaning(consistency: dict[str, Any]) -> dict[str, Any]:
         phrase = CONSEQUENCE_LABEL.get(worst, "a problem")
         verdict = ("trust the recommendations' grounding only with care"
                    if sv.get("worst_impact", 0.0) >= 0.5 else "mostly grounded, only minor gaps")
-        sentence = f"{n_match} agree, {n_err} diverge; the worst gap means {phrase}, so {verdict}."
+        sentence = (f"{n_match} agree, {n_err} diverge; the worst gap means {phrase}"
+                    f"{_driver_clause(sv)} (total cost {sv.get('total_cost', 0.0):.1f}), so {verdict}.")
     return {"verdict": {**sv, "takeaway": sentence}, "errors": errors, "matches": matches}
 
 
@@ -4076,23 +4077,34 @@ def render_ab_low_level(errors: list[dict[str, Any]], matches: list[dict[str, An
     return html.Ul(rows, className="diff-ul alignment-failure-list")
 
 
-def section_trust_sentence(passed: int, total: int, worst_category: str | None,
-                           worst_impact: float) -> str:
-    """One sentence: what this section's failures mean for TRUSTING its output,
-    built from the worst consequence + the pass stats."""
-    base = f"{passed} of {total} checks pass"
-    if not worst_category:
-        return base + " — nothing here harms the response, so this section is trustworthy."
-    phrase = CONSEQUENCE_LABEL.get(worst_category, "a problem")
+def _driver_clause(sv: dict[str, Any]) -> str:
+    """', driven mostly by 'X' (N×)' — the dominant failure behind the worst
+    consequence, so the top-level explanation names the cause, not just the cost."""
+    d = sv.get("driver_phrase", "")
+    return f", driven mostly by '{d}' ({sv.get('driver_count', 0)}×)" if d else ""
+
+
+def _trust_verdict_phrase(worst_impact: float) -> str:
     if worst_impact >= 0.9:
-        verdict = "do not trust the recommendations here"
-    elif worst_impact >= 0.5:
-        verdict = "trust this section's output only with care"
-    elif worst_impact >= 0.2:
-        verdict = "mostly trustworthy, with some wasted effort"
-    else:
-        verdict = "trustworthy; only minor clutter"
-    return f"{base}, but the worst failures mean {phrase}, so {verdict}."
+        return "do not trust the recommendations here"
+    if worst_impact >= 0.5:
+        return "trust this section's output only with care"
+    if worst_impact >= 0.2:
+        return "mostly trustworthy, with some wasted effort"
+    return "trustworthy; only minor clutter"
+
+
+def section_trust_sentence(passed: int, total: int, sv: dict[str, Any]) -> str:
+    """One sentence: what this section's failures mean for TRUSTING its output,
+    built from the worst consequence + its dominant driver + total cost + stats."""
+    worst = sv.get("worst_category")
+    base = f"{passed} of {total} checks pass"
+    if not worst:
+        return base + " — nothing here harms the response, so this section is trustworthy."
+    phrase = CONSEQUENCE_LABEL.get(worst, "a problem")
+    return (f"{base}, but the worst failures mean {phrase}{_driver_clause(sv)} "
+            f"(total victim cost {sv.get('total_cost', 0.0):.1f}), so "
+            f"{_trust_verdict_phrase(sv.get('worst_impact', 0.0))}.")
 
 
 CONSEQUENCE_SATURATION = 2.0  # Σ impact at which the internal penalty saturates
@@ -4208,25 +4220,38 @@ def consequence_verdict_for(errors: list[str]) -> dict[str, Any]:
     """One SECTION's verdict: map its errors to consequences (T3 model) and
     surface that section's worst, with pills per consequence category."""
     counts: dict[str, int] = {}
+    type_counts: dict[str, int] = {}
+    total_cost = 0.0
     unknown_n = 0
     for e in errors:
-        cat = CONSEQUENCE_CATEGORY.get(str(e), "no_effect")
+        t = str(e)
+        type_counts[t] = type_counts.get(t, 0) + 1
+        total_cost += consequence_score(t)
+        cat = CONSEQUENCE_CATEGORY.get(t, "no_effect")
         if cat == "unknown":           # uninterpretable: flagged, not a victim cost
             unknown_n += 1
             continue
         if cat == "no_effect":
             continue
         counts[cat] = counts.get(cat, 0) + 1
+    total_cost = round(total_cost, 2)
     unknown_pill = ([{"label": "unknown impact", "count": unknown_n, "color": "unknown",
                       "weight": None, "tooltip": CONSEQUENCE_HEADLINE["unknown"]}] if unknown_n else [])
     if not counts:
-        return {"worst_category": None, "worst_impact": 0.0,
+        return {"worst_category": None, "worst_impact": 0.0, "total_cost": total_cost,
+                "driver_phrase": "", "driver_count": 0,
                 "takeaway": ("Reasoning we could not interpret." if unknown_n
                              else "Clean — no victim-cost failures."),
                 "pills": (unknown_pill or [{"label": "no victim-cost failures", "count": 0,
                                             "color": "green", "tooltip": "Nothing here harms the response."}])}
     ordered = sorted(counts, key=lambda c: -CONSEQUENCE_IMPACT[c])
     worst = ordered[0]
+    # Dominant driver: the most common failure TYPE within the worst consequence.
+    worst_types = {t: c for t, c in type_counts.items()
+                   if CONSEQUENCE_CATEGORY.get(t, "no_effect") == worst}
+    driver_type = max(worst_types, key=lambda k: worst_types[k]) if worst_types else ""
+    driver_phrase = failure_phrase(driver_type) if driver_type else ""
+    driver_count = worst_types.get(driver_type, 0)
     takeaway = f"{CONSEQUENCE_LABEL[worst]}. {CONSEQUENCE_HEADLINE[worst]}"
     if len(ordered) > 1:
         takeaway += " Also: " + ", ".join(CONSEQUENCE_LABEL[c] for c in ordered[1:]) + "."
@@ -4235,6 +4260,7 @@ def consequence_verdict_for(errors: list[str]) -> dict[str, Any]:
               "tooltip": CONSEQUENCE_HEADLINE[c]}
              for c in ordered] + unknown_pill
     return {"worst_category": worst, "worst_impact": CONSEQUENCE_IMPACT[worst],
+            "total_cost": total_cost, "driver_phrase": driver_phrase, "driver_count": driver_count,
             "takeaway": takeaway, "pills": pills}
 
 
@@ -4311,7 +4337,8 @@ def generate_consequence_verdict(alignment: dict[str, Any], rule_conformance: di
     scored.sort(key=lambda nv: -nv[1]["worst_impact"])
     worst_section, worst_v = scored[0]
     worst = worst_v["worst_category"]
-    takeaway = (f"Worst across the scene: {CONSEQUENCE_LABEL[worst]} (from {worst_section}). "
+    takeaway = (f"Worst across the scene: {CONSEQUENCE_LABEL[worst]} (from {worst_section})"
+                f"{_driver_clause(worst_v)} (total victim cost {worst_v.get('total_cost', 0.0):.1f}). "
                 f"{CONSEQUENCE_HEADLINE[worst]}" + ctx_takeaway)
     # one pill per section, showing that section's worst consequence (the combination).
     pills = [{"label": f"{name}: {CONSEQUENCE_LABEL[v['worst_category']]}",
@@ -5823,68 +5850,74 @@ def make_causal_graph_viewer(
     )
 
 
+def make_conformance_meaning(rc: dict[str, Any]) -> dict[str, Any]:
+    """Rule-conformance higher-level meaning: the worst-consequence verdict +
+    a trust sentence (with dominant driver + total cost), plus the violations."""
+    violations = (rc or {}).get("violations") or []
+    sv = consequence_verdict_for([str(v.get("rule", "")) for v in violations])
+    n = len(violations)
+    worst = sv.get("worst_category")
+    if not worst:
+        sentence = (f"{n} rule violation(s), none with a victim cost — rulebook gaps that don't change the response."
+                    if n else "No rule violations — the model's graphs are rulebook-clean.")
+    else:
+        sentence = (f"{n} rule violation(s); the worst means {CONSEQUENCE_LABEL[worst]}{_driver_clause(sv)} "
+                    f"(total victim cost {sv.get('total_cost', 0.0):.1f}), so "
+                    f"{_trust_verdict_phrase(sv.get('worst_impact', 0.0))}.")
+    return {"verdict": {**sv, "takeaway": sentence}, "violations": violations}
+
+
 def make_rule_conformance_panel(rc: dict[str, Any]) -> html.Div:
-    """Render M7 rule-conformance results: rulebook violations in the model's
-    own graphs. Each violation is a caught lie (looked vs guessed)."""
+    """Render M7 rule-conformance results consequence-first: a verdict card on
+    top, then every violation as failure phrase → consequence · weight."""
     if not rc:
         return html.Div("Rule conformance unavailable.", className="empty-state")
-    violations = rc.get("violations") or []
     header = html.Div(
         "Rule conformance — the schema rulebook applied to the model's own graphs "
         "(no ground truth needed). Violations suggest pattern-matching instead of "
         "looking. Surface-only: not part of the trust score.",
         className="card-subtext card-subtitle",
     )
-    if not violations:
-        return html.Div(
-            [header, html.Div("No rule violations.", className="detail-value", style={"color": "#15803d", "fontWeight": "600"})]
-        )
-    # Group violations by failure family so the operator sees which family each
-    # belongs to, tinted by the family's severity color.
-    fam_bg = {"red": "#fee2e2", "amber": "#fef9c3"}
-    fam_line = {"red": "#dc2626", "amber": "#ca8a04"}
-    grouped: dict[str, list] = {}
+    meaning = make_conformance_meaning(rc)
+    violations = meaning["violations"]
+
+    rows: list[Any] = []
     for v in violations:
-        fam = RULE_TO_FAMILY.get(v.get("rule", ""), "hallucination")
-        grouped.setdefault(fam, []).append(v)
+        t = str(v.get("rule", ""))
+        cat = CONSEQUENCE_CATEGORY.get(t, "no_effect")
+        if cat == "unknown":
+            pill = html.Span("unknown impact", className="cons-tag cons-unknown")
+        else:
+            imp = consequence_score(t)
+            pill = html.Span(f"{CONSEQUENCE_LABEL[cat]} · {imp:.1f}",
+                             className=f"cons-tag cons-{consequence_color(imp)}")
+        rows.append(html.Li([
+            html.Div([html.Span(failure_phrase(t), className="failure-phrase-text",
+                                title=consequence_explanation(t)),
+                      html.Span(" → ", className="failure-arrow"), pill],
+                     className="failure-main-line"),
+            html.Div(f"{t} [{v.get('graph', '')}] — {v.get('detail', '')}", className="failure-tech-line"),
+        ]))
 
-    blocks = []
-    for fam, vs in sorted(grouped.items(), key=lambda kv: -len(kv[1])):
-        spec = FAILURE_FAMILIES.get(fam, {})
-        color = "red" if (fam == "hallucination" or len(vs) >= 2) else "amber"
-        rows = [
-            html.Div(
-                [
-                    html.Span(v.get("rule", ""), style={"fontWeight": "600", "marginRight": "8px"}),
-                    html.Span(f"[{v.get('graph', '')}]", style={"color": "#64748b", "marginRight": "8px"}),
-                    html.Span(v.get("detail", "")),
-                ],
-                style={"fontSize": "12px", "padding": "2px 0"},
-            )
-            for v in vs
-        ]
-        blocks.append(html.Div(
+    return html.Div([
+        header,
+        html.Div(
             [
-                html.Div(f"{spec.get('label', fam)} ×{len(vs)}",
-                         style={"fontWeight": "700", "fontSize": "12.5px",
-                                "marginBottom": "3px", "color": fam_line[color]}),
-                *rows,
+                html.Div("What this section means for trust", className="trust-section-label"),
+                *render_meaning_cards(meaning["verdict"]),
             ],
-            style={"borderLeft": f"4px solid {fam_line[color]}", "background": fam_bg[color],
-                   "padding": "6px 10px", "borderRadius": "6px", "marginBottom": "6px"},
-        ))
-
-    return html.Div(
-        [
-            header,
-            html.Div(
-                f"{rc.get('n_violations', len(violations))} violation(s) across "
-                f"{len(grouped)} failure famil{'y' if len(grouped)==1 else 'ies'}",
-                style={"color": "#b91c1c", "fontWeight": "700", "marginBottom": "6px"},
-            ),
-            *blocks,
-        ]
-    )
+            className="alignment-consequence-verdict",
+        ),
+        html.Div(
+            [
+                html.Div("Each violation and what it costs", className="trust-section-label"),
+                (html.Ul(rows, className="diff-ul alignment-failure-list") if rows
+                 else html.Div("No rule violations — the model's graphs are rulebook-clean.",
+                               className="detail-value", style={"color": "#15803d", "fontWeight": "600"})),
+            ],
+            className="diff-list alignment-failures",
+        ),
+    ])
 
 
 def make_consistency_panel(consistency: dict[str, Any]) -> html.Div:
@@ -6251,10 +6284,7 @@ def make_pre_internal_alignment_panel(alignment: dict[str, Any]) -> html.Div:
                     html.Div("What this section means for trust", className="trust-section-label"),
                     *render_meaning_cards({
                         **section_verdict,
-                        "takeaway": section_trust_sentence(
-                            passed, total_checks,
-                            section_verdict.get("worst_category"),
-                            section_verdict.get("worst_impact", 0.0)),
+                        "takeaway": section_trust_sentence(passed, total_checks, section_verdict),
                     }),
                 ],
                 className="alignment-consequence-verdict",
@@ -6288,7 +6318,7 @@ def make_reasoning_section_meaning(alignment: dict[str, Any],
     failed = int(alignment.get("failed_checks", 0) or 0)
     total = passed + failed
     sv = consequence_verdict_for([str(f.get("type", "")) for f in (alignment.get("failures", []) or [])])
-    sentence = section_trust_sentence(passed, total, sv.get("worst_category"), sv.get("worst_impact", 0.0))
+    sentence = section_trust_sentence(passed, total, sv)
     blocks = [
         html.Div(
             [
@@ -13939,7 +13969,7 @@ def render_results(
     # sentence + consequence pills), not the old self-incoherent pattern.
     reasoning_meaning = make_reasoning_section_meaning(
         normalized.get("pre_internal_alignment", {}), normalized.get("graph_consistency", {}))
-    conformance_meaning = render_meaning_header(sm.get("conformance") or generate_conformance_meaning(normalized.get("rule_conformance", {})))
+    conformance_meaning = render_meaning_cards(make_conformance_meaning(normalized.get("rule_conformance", {}))["verdict"])
     pathology_meaning = render_meaning_header(sm.get("pathology") or generate_pathology_meaning(normalized.get("pathologies", {})))
     accuracy_meaning = render_meaning_header(sm.get("accuracy") or generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
     # Persisted in normalize_result; fall back to computing if absent (old data).
