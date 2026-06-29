@@ -7917,6 +7917,7 @@ def _process_one_image(
 
         # Save structured response
         result["run_id"] = run_id
+        result["caption"] = caption or ""  # parity with analyze_scene: self-describing run (T16 context)
         if category:
             result["disaster_category"] = category  # folder-based tag, separate from model's disaster_type
         payload = {

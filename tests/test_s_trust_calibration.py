@@ -366,6 +366,47 @@ def test_s17_meaning_cards(main_module):
 
 
 @pytest.mark.blocking
+def test_s25_single_batch_consistency(main_module):
+    """Sweep regression-lock: single↔batch parity + batch rollup invariants.
+    The batch report and the single-run card share compute_trust_synthesis, so
+    per-run synthesis must match; rollup rates/sums must be coherent; the batch
+    worker must persist caption like analyze_scene."""
+    import inspect
+    m = main_module
+    runs = []
+    for sr in _load().values():
+        r = m.normalize_result(dict(sr))
+        r["disaster_scenario"] = "Yes"
+        runs.append(r)
+    rep = m.compute_pre_intervention_report(runs)
+    cr = rep["consequence_rollup"]
+
+    # rollup invariants
+    assert len(cr["per_run"]) == len(runs)
+    for k in ("core_missed_rate", "spurious_rate", "gt_corroborated_rate"):
+        assert 0.0 <= cr[k] <= 1.0, f"{k} out of range"
+    n_with = sum(1 for p in cr["per_run"] if p["worst_category"])
+    assert sum(cr["worst_distribution"].values()) == n_with
+    assert sum(cr["convergence_distribution"].values()) == n_with
+
+    # single↔batch: the batch per-run row IS compute_trust_synthesis (shared with
+    # the single-run card via make_top_trust_synthesis)
+    for run, row in zip(runs, cr["per_run"]):
+        s = m.compute_trust_synthesis(run)
+        assert s["worst_category"] == row["worst_category"]
+        assert s["n_convergence"] == row["n_convergence"]
+        assert bool(s["gt_corroborates"]) == bool(row["gt_corroborates"])
+
+    # ML layer coverage: every scorable consequence + every pathology mapped
+    victim = {c for c, i in m.CONSEQUENCE_IMPACT.items() if i > 0 and c != "unknown"}
+    assert victim <= set(m.CONSEQUENCE_ML_HYPOTHESIS)
+    assert set(m.PATHOLOGY_REGISTRY) <= set(m.PATHOLOGY_MITIGATION)
+
+    # parity: the batch worker persists caption inside the run (analyze_scene does)
+    assert 'result["caption"]' in inspect.getsource(m._process_one_image)
+
+
+@pytest.mark.blocking
 def test_s24_batch_groundedness_card(main_module):
     """The batch top card: groundedness profile + standout + ML hypotheses and
     candidate mitigations (incl. the alignment-track lever)."""
