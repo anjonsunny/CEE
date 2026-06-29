@@ -3205,7 +3205,7 @@ def assess_pre_intervention_trust(
             f"what a live (un-verified) scene would score."
         )
     if not qualifiers:
-        qualifiers.append("Baseline causal account is internally coherent and mechanism agreement is strong.")
+        qualifiers.append("Baseline causal account is internally coherent and cross-graph agreement (A vs B) is strong.")
 
     if score >= 0.85 and not invalid_edges and a_fidelity >= 0.75:
         level = "high"
@@ -3240,7 +3240,7 @@ def assess_pre_intervention_trust(
     elif coverage_b < 1.0:
         reason = "Some hazardous nodes do not receive outgoing causal reasoning in Graph B."
     else:
-        reason = "The baseline causal account is internally coherent and mechanism agreement is strong."
+        reason = "The baseline causal account is internally coherent and cross-graph agreement (A vs B) is strong."
 
     if use == "weight_strongly":
         consequence = "A post-intervention shift can be interpreted as stronger evidence of causal groundedness."
@@ -3884,9 +3884,9 @@ CONSEQUENCE_EXPLANATION = {
     "threat_state_mismatch": "the threat's state contradicts the detection, so the wrong hazard may be acted on",
     "threat_state_not_hazard_bearing": "a threat isn't in a hazardous state, so it's a non-threat drawing effort",
     # A↔B consistency disagreements
-    "ab_edge_unaddressed": "the model's own mechanism shows this danger pathway, but no recommendation acts on it",
-    "ab_flag_unaddressed": "the mechanism flags this entity as a hazard, but the recommendations don't address it",
-    "ab_edge_unconfirmed": "the recommendations claim this link, but the independent mechanism graph doesn't back it; we can't tell if it's a real protective action or a fabrication, so it doesn't get a victim cost — it counts against trust instead",
+    "ab_edge_unaddressed": "the model's own independent graph (B) shows this danger pathway, but no recommendation acts on it",
+    "ab_flag_unaddressed": "the independent graph flags this entity as a hazard, but the recommendations don't address it",
+    "ab_edge_unconfirmed": "the recommendations claim this link, but the model's independent graph doesn't back it; we can't tell if it's a real protective action or a fabrication, so it doesn't get a victim cost — it counts against trust instead",
     "ab_effect_disputed": "both graphs see this link but disagree on how it harms; we can't tell which is right, so it counts against trust, not as a victim cost",
     "ab_flag_unconfirmed": "the recommendations treat this as a hazard, but the mechanism doesn't confirm it; unverified, so it counts against trust, not as a victim cost",
     # Accuracy / Test 1
@@ -4099,7 +4099,7 @@ def enumerate_ab_consistency(gc: dict[str, Any]) -> dict[str, list[dict[str, Any
     matches: list[dict[str, Any]] = []
     for e in in_both:
         matches.append({"kind": "grounded_edge", "detail": _fmt_ab_edge(e),
-                        "meaning": "grounded — the recommendation rests on the model's own mechanism (confirmed by Graph B)"})
+                        "meaning": "grounded — the recommendation is corroborated by the model's own independent graph (Graph B)"})
     for f in flags:
         if f.get("agree") and f.get("graph_a"):  # both mark it hazardous
             matches.append({"kind": "agreed_hazard", "detail": str(f.get("id")),
@@ -4117,7 +4117,7 @@ def make_ab_section_meaning(consistency: dict[str, Any]) -> dict[str, Any]:
     worst = sv.get("worst_category")
     if not worst and not n_err:
         sentence = (f"{n_match} causal commitment(s) agree and none diverge — the recommendations "
-                    "are grounded in the model's own mechanism." if n_match
+                    "are corroborated by the model's own independent graph (B)." if n_match
                     else "Nothing to compare between the two graphs.")
     elif not worst:  # only unknown-impact divergences
         sentence = (f"{n_err} commitment(s) diverge but none is a clear victim cost ({n_match} agree); "
@@ -6248,7 +6248,7 @@ def make_consistency_panel(consistency: dict[str, Any]) -> html.Div:
                             html.P([
                                 html.B("Reading it: "),
                                 "Each link-by-link disagreement is shown as an error → its consequence. "
-                                "The mapping is asymmetric, because B is the mechanistic yardstick: a danger "
+                                "The mapping is asymmetric, because B is the independent (action-decoupled) yardstick: a danger "
                                 "link B asserts that the recommendations ignore is a real miss → ",
                                 html.B("danger under-treated"),
                                 "; a link the recommendations claim that B doesn't confirm is unverified "
@@ -6256,7 +6256,7 @@ def make_consistency_panel(consistency: dict[str, Any]) -> html.Div:
                                 html.B("unknown impact"),
                                 ", which lands on trust, not the victim. Agreements are shown green = ",
                                 html.B("grounded"),
-                                " (the recommendation rests on the model's own mechanism). ",
+                                " (the recommendation is corroborated by the model's own independent graph). ",
                                 html.B("B-coverage"), " carries the under-treated gap, ",
                                 html.B("A-fidelity"), " the unknown gap; the other metrics are diagnostic. "
                                 "This measures self-consistency, NOT correctness.",
@@ -6841,7 +6841,7 @@ def interpret_pre_intervention_report(report: dict[str, Any]) -> list[dict[str, 
             findings.append({
                 "kind": "warning",
                 "headline": f"Recommendations are weakly grounded in the model's own causal beliefs (A-fidelity median {med:.2f})",
-                "detail": f"More than half of recommendation edges aren't corroborated by the model's independent graph.{extra} This is the core declarative-vs-mechanistic asymmetry.",
+                "detail": f"More than half of recommendation edges aren't corroborated by the model's independent graph.{extra} This is the core gap between the action-coupled recommendations and the model's action-decoupled graph (two declarations, not a mechanism test).",
             })
         elif med < 0.85:
             findings.append({
