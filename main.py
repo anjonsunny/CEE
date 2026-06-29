@@ -4109,12 +4109,25 @@ def enumerate_gt_accuracy(gv: dict[str, Any]) -> dict[str, list[dict[str, Any]]]
         errors.append({"type": "gt_wrong_effect",
                        "detail": f"{pair[0]} → {pair[1]}: model '{m_e.get('effect', '?')}' "
                                  f"vs answer key '{gt_e.get('effect', '?')}'"})
-    for e in missed:
-        if st(e) not in wrong_effect_pairs:
-            errors.append({"type": "gt_missed_danger", "detail": _fmt_ab_edge(e)})
-    for e in spurious:
-        if st(e) not in wrong_effect_pairs:
-            errors.append({"type": "gt_fabricated_hazard", "detail": _fmt_ab_edge(e)})
+
+    # Dedup missed/fabricated DANGERS by their hazard (source): one hazard that
+    # spans many edges is ONE missed/fabricated danger, not N. (Sunny: count by
+    # distinct hazard, not by edge — otherwise graph fan-out inflates the cost.)
+    def by_hazard(edges: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for e in edges:
+            if st(e) not in wrong_effect_pairs:
+                groups.setdefault(str(e.get("source", "")), []).append(e)
+        return groups
+
+    for src, edges in sorted(by_hazard(missed).items()):
+        errors.append({"type": "gt_missed_danger", "hazard": src,
+                       "detail": f"{src}: {len(edges)} link(s) the model missed — "
+                                 + "; ".join(_fmt_ab_edge(e) for e in edges)})
+    for src, edges in sorted(by_hazard(spurious).items()):
+        errors.append({"type": "gt_fabricated_hazard", "hazard": src,
+                       "detail": f"{src}: {len(edges)} fabricated link(s) — "
+                                 + "; ".join(_fmt_ab_edge(e) for e in edges)})
     matches = [{"kind": "gt_correct", "tag": "correct", "detail": _fmt_ab_edge(e),
                 "meaning": "correct — this causal link is confirmed by the verified answer key"}
                for e in (d.get("matched", []) or [])]
