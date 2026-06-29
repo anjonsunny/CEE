@@ -394,11 +394,12 @@ def test_s26_computation_correctness(main_module):
                        {"source": "h2", "via_state": "burning", "effect": "may_harm", "target": "p2"}],
              "threat_reasoning_coverage": 1.0}
     assert m.check_graph_rule_conformance(clean, "graph_a") == []
-    bad = {"nodes": [{"id": "h1", "hazardous": True, "state": "burning"},
-                     {"id": "x1", "hazardous": False, "state": "intact"}],
-           "edges": [{"source": "x1", "via_state": "intact", "effect": "may_harm", "target": "h1"}]}
+    bad = {"nodes": [{"id": "h1", "hazardous": True, "state": "burning"},      # isolated hazard, no edges
+                     {"id": "x1", "hazardous": False, "state": "intact"},
+                     {"id": "p1", "at_risk": True, "state": "injured", "label": "person"}],
+           "edges": [{"source": "x1", "via_state": "intact", "effect": "may_harm", "target": "p1"}]}
     bad_rules = {v["rule"] for v in m.check_graph_rule_conformance(bad, "graph_a")}
-    assert "hazardous_node_no_edges" in bad_rules        # h1 declared hazard, no outgoing edge
+    assert "hazardous_node_no_edges" in bad_rules        # h1 declared hazard, participates in NO edge
     assert "edge_from_non_hazardous" in bad_rules        # edge from x1 (not hazardous)
 
     # --- consequence cap (T3): internal = min(passratio, 1 - min(0.9, Σ/2)) ---
