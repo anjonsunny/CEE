@@ -861,6 +861,29 @@ Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/sha
 - **Why:** The sweep found `detect_spurious_grounding` originally read only `rule_conformance`, so it caught push_61 by luck (a graph edge) and missed the real at-risk-state spurious signals that live in alignment.
 - **Severity:** BLOCKING. **Status:** auto.
 
+### S25 — Single↔batch consistency [sweep regression-lock]
+- **What:** The batch report and single-run card share `compute_trust_synthesis`, so per-run synthesis matches by construction. Locks: rollup rates in [0,1] and distributions sum to n; per-run synthesis parity (worst category, convergence, GT corroboration); ML hypothesis/mitigation coverage; the caption-parity static check (`_process_one_image` sets `result["caption"]` like `analyze_scene`).
+- **Why:** The single↔batch sweep found `_process_one_image` did not persist `result["caption"]` (parity gap with the single path). Fixed in 081ec99; this locks it.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### S26 — Single-run computation correctness (not invariants)
+- **What:** Known input → hand-computed output per core computation: `compare_graphs` edge/node diff + a_fidelity/b_coverage; `check_graph_rule_conformance` (clean graph = 0 violations, isolated hazard + non-hazard source fire); consequence cap `1−min(0.9, Σimpact/2)`; the trust FORMULA end-to-end (clean scene → 1.0, one misroute Σ=0.9 cap 0.55 → 0.82); `detect_pathologies` firing thresholds.
+- **Why:** The earlier sweep checked invariants/parity, not correctness of the underlying logic. This pins the actual computed values.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### S27 — Batch aggregation correctness
+- **What:** Every rollup count/rate equals an independent recompute from per-run data: `batch_rule_conformance.total_violations` == per-run sum, `family_rollup` + `by_rule` reconcile to it, pathology counts, worst-consequence distribution.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### S28 — Full rule + failure coverage (deep audit lock)
+- **What:** Every one of the 19 conformance rules and 29 alignment failures actually triggers — the 8 conformance + 7 alignment types fixtures never exercise are driven by constructed minimal inputs; the rest are covered by the fixture union (union must cover all 19 / all 29). Plus soft/topological matching (same edge, different effect → soft+topo match, strict doesn't, source mismatch → no soft match), `_graph_b_validity` degraded (conf 0.5, coh 1.0, beta 0.75), `derive_gt_validation` b_edge_diff partition disjoint on real GT, `detect_spurious_grounding` include/exclude, `analyze_caption_use` core-missed, `_detect_truth_suppression` rules (a)/(b)/no-fire.
+- **Why:** The deep correctness audit verified each detection path; this prevents any rule/failure from silently breaking or being dropped.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### S29 — Full batch-surface reconciliation (deep audit lock)
+- **What:** Every population surface equals an independent recompute from per-run data: `trust_distribution`, a `metric_distributions` median (trust_score), `graph_b_validity_rollup.beta_median` (sourced from `pre_intervention_trust.components.b_validity_beta`), and `consequence_rollup.convergence_distribution` (keyed on `n_convergence`, the int).
+- **Severity:** BLOCKING. **Status:** auto.
+
 ### S8 — Meaning hierarchy renders in the trust card
 - **What:** `make_pre_intervention_trust_panel` renders the top verdict ("Bottom line — worst consequence") plus a collapsible "By section" tier-2 breakdown (each section's own verdict).
 - **Severity:** BLOCKING. **Status:** auto.

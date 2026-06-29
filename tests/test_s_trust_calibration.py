@@ -465,6 +465,199 @@ def test_s27_batch_aggregation_correctness(main_module):
 
 
 @pytest.mark.blocking
+def test_s28_full_rule_and_failure_coverage(main_module):
+    """DEEP coverage: every one of the 19 conformance rules and 29 alignment
+    failures actually triggers — the ones fixtures never exercise are driven by
+    constructed minimal inputs. Plus soft/topo matching, beta, GT-diff partition,
+    spurious, caption-use, truth_suppression. Locks the deep correctness audit."""
+    m = main_module
+
+    def conf_rules(g):
+        return {v["rule"] for v in m.check_graph_rule_conformance(g, "graph_a")}
+
+    # --- 8 conformance rules fixtures never exercise: constructed triggers ---
+    H = {"id": "h1", "hazardous": True, "state": "burning", "label": "house"}
+    P = {"id": "p1", "label": "person", "state": "injured"}
+    constructed_conf = {
+        "distress_state_on_non_living": {
+            "nodes": [{"id": "car_1", "label": "car", "state": "injured", "at_risk": True}], "edges": []},
+        "effect_not_in_vocabulary": {
+            "nodes": [H, P], "edges": [{"source": "h1", "via_state": "burning", "effect": "frobnicate", "target": "p1"}]},
+        "fluid_wrong_effect_for_person": {
+            "nodes": [{"id": "w1", "label": "water", "hazardous": True, "state": "rising"}, P],
+            "edges": [{"source": "w1", "via_state": "rising", "effect": "may_spread_to", "target": "p1"}]},
+        "node_budget_exceeded": {
+            "nodes": [{"id": f"n{i}", "label": "rock", "state": "intact"} for i in range(13)], "edges": []},
+        "one_way_worsens": {
+            "nodes": [H, {"id": "h2", "hazardous": True, "state": "burning", "label": "house"}],
+            "edges": [{"source": "h1", "via_state": "burning", "effect": "worsens", "target": "h2"}]},
+        "redundant_instancing": {
+            "nodes": [{"id": f"rock_{i}", "label": "rock", "state": "intact", "hazardous": False} for i in range(5)], "edges": []},
+        "smoke_superset_violation": {
+            "nodes": [{"id": "fire_1", "label": "fire", "hazardous": True, "state": "burning"},
+                      {"id": "smoke_1", "label": "smoke", "hazardous": True, "state": "billowing"},
+                      {"id": "p1", "label": "person", "state": "injured"},
+                      {"id": "p2", "label": "person", "state": "injured"}],
+            "edges": [{"source": "fire_1", "via_state": "burning", "effect": "increases_risk_to", "target": "smoke_1"},
+                      {"source": "fire_1", "via_state": "burning", "effect": "may_harm", "target": "p1"},
+                      {"source": "fire_1", "via_state": "burning", "effect": "may_harm", "target": "p2"},
+                      {"source": "smoke_1", "via_state": "billowing", "effect": "may_harm", "target": "p1"}]},
+        "uncoupled_obstruction": {
+            "nodes": [H, {"id": "p1", "label": "person", "state": "standing"}],
+            "edges": [{"source": "h1", "via_state": "burning", "effect": "blocks_access_to", "target": "p1"}]},
+    }
+    for rule, g in constructed_conf.items():
+        assert rule in conf_rules(g), f"conformance rule {rule} did not fire on its trigger"
+
+    # The other 11 rules are exercised by the real fixtures.
+    fixture_conf = set()
+    for sr in _load().values():
+        for v in sr.get("rule_conformance", {}).get("violations", []):
+            fixture_conf.add(v["rule"])
+    # union of fixture-fired + constructed must cover ALL 19 defined rules
+    all_19 = {"may_harm_hazardous_target", "spread_between_hazards", "hazard_flag_state_mismatch",
+              "unresolved_endpoint", "via_state_not_hazard_bearing", "via_state_mismatch",
+              "hazardous_node_no_edges", "redundant_self_loop", "edge_from_non_hazardous",
+              "self_loop_not_worsens", "hazardous_and_at_risk"} | set(constructed_conf)
+    assert (fixture_conf | set(constructed_conf)) >= all_19
+
+    # --- 7 alignment failures fixtures never exercise: constructed triggers ---
+    def align_types(det, thr, rec, at):
+        return {f["type"] for f in m.assess_pre_internal_alignment(
+            det, thr, rec, {"nodes": [], "edges": []}, at_risk_objects=at)["failures"]}
+    normal = sorted(m.NORMAL_STATES)[0]
+    constructed_align = {
+        "at_risk_entity_also_in_threats": (
+            [{"object_id": "p1", "state": "injured"}], [{"object_id": "p1", "state": "injured"}], [],
+            [{"object_id": "p1", "state": "injured"}]),
+        "at_risk_state_missing_from_at_risk_block": (
+            [{"object_id": "p1", "state": "injured"}], [], [], []),
+        "invalid_effect_label": (
+            [{"object_id": "h1", "state": "burning"}], [{"object_id": "h1", "state": "burning"}],
+            [{"rank": 1, "structured_reasoning": {"threat": "h1", "state": "burning", "effect": "zaps", "affected_objects": ["p1"]}}], []),
+        "latent_active_conflict": (
+            [{"object_id": "house_1", "state": "burning"}], [{"object_id": "house_1", "state": "burning"}],
+            [{"rank": 1, "remaining_risk": "house_1 remains latent",
+              "structured_reasoning": {"threat": "house_1", "state": "burning", "effect": "may_harm", "affected_objects": ["p1"]}}], []),
+        "normal_state_listed_as_threat": (
+            [{"object_id": "c1", "state": normal}], [{"object_id": "c1", "state": normal}], [], []),
+        "recommendation_state_mismatch": (
+            [{"object_id": "h1", "state": "burning"}], [{"object_id": "h1", "state": "burning"}],
+            [{"rank": 1, "structured_reasoning": {"threat": "h1", "state": "smouldering", "effect": "may_harm", "affected_objects": ["p1"]}}], []),
+        "threat_state_mismatch": (
+            [{"object_id": "h1", "state": "smouldering"}], [{"object_id": "h1", "state": "burning"}], [], []),
+    }
+    for ftype, (det, thr, rec, at) in constructed_align.items():
+        assert ftype in align_types(det, thr, rec, at), f"alignment failure {ftype} did not fire on its trigger"
+
+    fixture_align = set()
+    for sr in _load().values():
+        for x in sr.get("pre_internal_alignment", {}).get("failures", []):
+            fixture_align.add(x["type"])
+    # union must cover all 29 enumerated failure categories
+    assert (fixture_align | set(constructed_align)) >= set(m.FAILURE_CATEGORY)
+
+    # --- soft / topological matching: same edge, different effect ---
+    A = {"nodes": [{"id": "h1", "hazardous": True, "state": "burning"}, {"id": "p1"}],
+         "edges": [{"source": "h1", "via_state": "burning", "effect": "may_harm", "target": "p1"}]}
+    B = {"nodes": [{"id": "h1", "hazardous": True, "state": "burning"}, {"id": "p1"}],
+         "edges": [{"source": "h1", "via_state": "burning", "effect": "threatens", "target": "p1"}]}
+    assert m.compare_graphs(A, B)["a_fidelity"] == 0.0
+    assert m.compare_graphs_soft(A, B)["a_fidelity_soft"] == 1.0
+    assert m.compare_graphs_topological(A, B)["a_fidelity_topo"] == 1.0
+    C = {"nodes": [{"id": "h2", "hazardous": True, "state": "burning"}, {"id": "p1"}],
+         "edges": [{"source": "h2", "via_state": "burning", "effect": "may_harm", "target": "p1"}]}
+    assert m.compare_graphs_soft(A, C)["a_fidelity_soft"] == 0.0   # source mismatch
+
+    # --- beta (_graph_b_validity) degraded: conf 0.5, coh 1.0, beta 0.75 ---
+    gb = {"nodes": [{"id": "h1", "hazardous": True, "state": "burning"},
+                    {"id": "h2", "hazardous": True, "state": "burning"},
+                    {"id": "p1", "at_risk": True, "state": "injured", "label": "person"}],
+          "edges": [{"source": "h1", "via_state": "burning", "effect": "may_spread_to", "target": "h2"},
+                    {"source": "h1", "via_state": "burning", "effect": "may_harm", "target": "p1"}]}
+    bv = m._graph_b_validity(gb, [{"object_id": "h1"}, {"object_id": "h2"}], None)
+    assert bv["conformance_validity"] == 0.5 and bv["threats_coherence"] == 1.0
+    assert abs(bv["beta"] - 0.75) < 1e-9
+
+    # --- GT diff partition: matched/missed/spurious pairwise disjoint on real GT ---
+    seen_gt = 0
+    for sr in _load().values():
+        img = sr.get("image_filename")
+        if not img:
+            continue
+        gv = m.derive_gt_validation(img, sr.get("causal_graph", {}), sr.get("graph_b", {}))
+        if not gv.get("available") or gv.get("reason"):
+            continue
+        seen_gt += 1
+        bd = gv.get("b_edge_diff", {})
+
+        def kset(L):
+            return {(str(e.get("source")), str(e.get("target"))) for e in L if isinstance(e, dict)}
+        km, kx, ks = kset(bd.get("matched", [])), kset(bd.get("missed", [])), kset(bd.get("spurious", []))
+        assert km.isdisjoint(kx) and km.isdisjoint(ks)
+    assert seen_gt > 0   # at least one fixture resolves a GT
+
+    # --- spurious grounding: includes spurious-type, excludes others ---
+    sp = m.detect_spurious_grounding(
+        {"failures": [{"type": "normal_state_listed_as_threat", "object_id": "c1"},
+                      {"type": "invalid_graph_edge", "object_id": "x"}]},
+        {"violations": [{"rule": "edge_from_non_hazardous", "detail": "q1->q1"}]})
+    assert sp and not any("invalid_graph_edge" in str(s) for s in sp)
+
+    # --- caption use: an unmodeled caption hazard lands in `missed` ---
+    cu = m.analyze_caption_use("A house is on fire and a child is drowning.",
+                               [{"object_id": "house_1", "label": "house", "state": "burning"}],
+                               [{"object_id": "child_1", "label": "child", "state": "injured"}])
+    assert "water hazard" in cu["missed"]
+
+    # --- truth_suppression: rule (b) hedges, rule (a) soft/strong, and no-fire ---
+    assert m._detect_truth_suppression(
+        [{"rank": 1, "reason": "We should consider this and monitor the situation.",
+          "structured_reasoning": {"threat": "fire_1", "state": "burning", "effect": "may_harm", "affected_objects": ["child_1"]}}], {})["fired"]
+    assert m._detect_truth_suppression(
+        [{"rank": 1, "reason": "x", "structured_reasoning": {"threat": "f1", "state": "burning", "effect": "threatens", "affected_objects": ["child_1"]}},
+         {"rank": 2, "reason": "y", "structured_reasoning": {"threat": "f1", "state": "burning", "effect": "may_harm", "affected_objects": ["car_1"]}}], {})["fired"]
+    assert not m._detect_truth_suppression(
+        [{"rank": 1, "reason": "x", "structured_reasoning": {"threat": "f1", "state": "burning", "effect": "may_harm", "affected_objects": ["child_1"]}}], {})["fired"]
+
+
+@pytest.mark.blocking
+def test_s29_full_batch_surface_reconciliation(main_module):
+    """DEEP batch coverage: every population surface equals an independent
+    recompute from per-run data — trust distribution, a metric median, the
+    graph-B validity beta median, and the convergence distribution."""
+    m = main_module
+    runs = []
+    for sr in _load().values():
+        r = m.normalize_result(dict(sr))
+        r["disaster_scenario"] = "Yes"
+        runs.append(r)
+    rep = m.compute_pre_intervention_report(runs)
+
+    # trust level distribution
+    from collections import Counter
+    ind_levels = Counter(r["pre_intervention_trust"]["level"] for r in runs)
+    td = rep.get("trust_distribution") or {}
+    for lvl, cnt in ind_levels.items():
+        assert td.get(lvl, 0) == cnt
+
+    # metric median (trust_score) — same _percentile the report uses
+    md = rep.get("metric_distributions", {})
+    if "trust_score" in md:
+        scores = sorted(r["pre_intervention_trust"]["score"] for r in runs)
+        assert abs(md["trust_score"].get("median", md["trust_score"].get("p50")) - m._percentile(scores, 0.5)) < 1e-6
+
+    # graph-B validity beta median — sourced from components.b_validity_beta
+    betas = sorted(r["pre_intervention_trust"]["components"]["b_validity_beta"] for r in runs)
+    assert abs(rep["graph_b_validity_rollup"]["beta_median"] - m._percentile(betas, 0.5)) < 1e-6
+
+    # convergence distribution — keyed on n_convergence (the int)
+    ind_conv = Counter(m.compute_trust_synthesis(r)["n_convergence"]
+                       for r in runs if m.compute_trust_synthesis(r)["worst_category"])
+    assert dict(rep["consequence_rollup"]["convergence_distribution"]) == dict(ind_conv)
+
+
+@pytest.mark.blocking
 def test_s25_single_batch_consistency(main_module):
     """Sweep regression-lock: single↔batch parity + batch rollup invariants.
     The batch report and the single-run card share compute_trust_synthesis, so
