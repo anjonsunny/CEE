@@ -7002,6 +7002,51 @@ def render_report_markdown(
             lines.append(f"> {f.get('detail', '')}")
             lines.append("")
 
+    # Headline synthesis — how grounded the model is across the batch, plus the
+    # ML-cause/mitigation hypotheses. Rendered from the SAME summary the UI card
+    # uses (compute_batch_groundedness_summary) so the PDF can't drift from screen.
+    gsum = compute_batch_groundedness_summary(report)
+    if gsum:
+        lines.append("## How grounded is the model? (combined across runs)")
+        lines.append("")
+        lines.append(gsum["profile"])
+        lines.append("")
+        if gsum["driver_line"]:
+            lines.append(gsum["driver_line"])
+            lines.append("")
+        if gsum["ml_blocks"]:
+            lines.append("**Most plausible ML causes & mitigations (hypotheses, not proven):**")
+            lines.append("")
+            for b in gsum["ml_blocks"]:
+                lines.append(f"- **{b['title']}**")
+                lines.append(f"  - Likely ML cause: {b['hypothesis']}")
+                lines.append(f"  - Candidate fix: {b['mitigation']}")
+            lines.append("")
+
+    cr = report.get("consequence_rollup") or {}
+    if cr.get("n_runs"):
+        lines.append("## Consequence rollup (population synthesis)")
+        lines.append("")
+        wd = cr.get("worst_distribution") or {}
+        if wd:
+            lines.append("Worst-consequence distribution (worst-wins per scene):")
+            lines.append("")
+            for cat, c in wd.items():
+                label = CONSEQUENCE_LABEL.get(cat, cat)
+                lines.append(f"- {label}: **{c}**")
+            lines.append("")
+        lines.append(f"- Core hazard missed: **{cr.get('core_missed_rate', 0.0):.0%}** of runs")
+        lines.append(f"- Leans on spurious features: **{cr.get('spurious_rate', 0.0):.0%}** of runs")
+        lines.append(f"- GT-corroborated (of flagged): **{cr.get('gt_corroborated_rate', 0.0):.0%}**")
+        conv = cr.get("convergence_distribution") or {}
+        if conv:
+            conv_str = ", ".join(f"{k} check(s): {v}" for k, v in sorted(conv.items()))
+            lines.append(f"- Convergence (independent checks agreeing per scene): {conv_str}")
+        top_drivers = cr.get("top_drivers") or []
+        if top_drivers:
+            lines.append(f"- Top drivers: " + ", ".join(f"{d} ({c}×)" for d, c in top_drivers[:6]))
+        lines.append("")
+
     trust_dist = report.get("trust_distribution") or {}
     if trust_dist:
         lines.append("## Trust level distribution")
@@ -7318,6 +7363,48 @@ def render_report_markdown(
             lines.append("")
 
     return "\n".join(lines)
+
+
+# Minimal print CSS for the PDF export: readable tables, page-friendly headings.
+_REPORT_PDF_CSS = """
+@page { size: A4; margin: 1.6cm; }
+body { font-family: Helvetica, Arial, sans-serif; font-size: 9pt; color: #1a1a1a; line-height: 1.4; }
+h1 { font-size: 17pt; border-bottom: 2px solid #333; padding-bottom: 4px; }
+h2 { font-size: 12.5pt; margin-top: 14px; color: #14304a; border-bottom: 1px solid #ccc; }
+h3 { font-size: 10.5pt; margin-top: 10px; color: #333; }
+table { border-collapse: collapse; width: 100%; margin: 6px 0; }
+th, td { border: 1px solid #bbb; padding: 3px 5px; text-align: left; font-size: 8pt; }
+th { background: #eef2f6; }
+code { background: #f2f2f2; padding: 0 2px; font-family: monospace; font-size: 8pt; }
+blockquote { color: #555; border-left: 3px solid #ccc; margin: 6px 0; padding-left: 8px; }
+"""
+
+
+def render_report_pdf(
+    report: dict[str, Any],
+    findings: list[dict[str, str]],
+    source_folder: str,
+    skipped: list[dict[str, str]] | None = None,
+    external_tests: dict[str, Any] | None = None,
+) -> bytes:
+    """Render the batch report to PDF bytes. Reuses render_report_markdown so the
+    PDF carries exactly the same (complete) content, converts to HTML via the
+    markdown lib, then to PDF via xhtml2pdf (pure-python, no native deps).
+
+    Raises RuntimeError if the conversion fails so callers can surface it rather
+    than hand back a corrupt file.
+    """
+    import markdown as _markdown
+    from xhtml2pdf import pisa
+
+    md = render_report_markdown(report, findings, source_folder, skipped, external_tests=external_tests)
+    body = _markdown.markdown(md, extensions=["tables", "sane_lists"])
+    document = f"<html><head><style>{_REPORT_PDF_CSS}</style></head><body>{body}</body></html>"
+    buffer = io.BytesIO()
+    result = pisa.CreatePDF(io.StringIO(document), dest=buffer, encoding="utf-8")
+    if result.err:
+        raise RuntimeError(f"PDF rendering failed with {result.err} error(s)")
+    return buffer.getvalue()
 
 
 # ────────────────────────────────────────────────────────────
@@ -7744,9 +7831,10 @@ def save_report(
     out_root: Path | None = None,
     external_tests: dict[str, Any] | None = None,
 ) -> Path:
-    """Persist a report as both JSON and Markdown into exports/reports/<ts>/.
+    """Persist a report as JSON, Markdown, and PDF into exports/reports/<ts>/.
 
-    Returns the directory path containing the saved files.
+    Returns the directory path containing the saved files. PDF generation is
+    best-effort: a failure is logged and the JSON/MD still save.
     """
     out_root = out_root or (EXPORT_ROOT / "reports")
     timestamp = datetime.now().strftime("report_%Y%m%dT%H%M%S")
@@ -7765,6 +7853,12 @@ def save_report(
     (out_dir / "report.md").write_text(
         render_report_markdown(report, findings, source_folder, skipped, external_tests=external_tests)
     )
+    try:
+        (out_dir / "report.pdf").write_bytes(
+            render_report_pdf(report, findings, source_folder, skipped, external_tests=external_tests)
+        )
+    except Exception as exc:  # pragma: no cover - PDF is best-effort
+        print(f"[save_report] PDF export skipped: {exc}")
     return out_dir
 
 
@@ -8801,15 +8895,15 @@ def make_gt_validation_panel(gt_validation: dict[str, Any]) -> html.Div:
     )
 
 
-def make_batch_groundedness_card(report: dict[str, Any]) -> html.Div:
-    """Batch top card: combine every single-run synthesis into one reading of how
-    grounded the model is — population evidence, what stands out, and the most
-    plausible ML causes + candidate mitigations (hypotheses, the bridge to the
-    alignment track)."""
+def compute_batch_groundedness_summary(report: dict[str, Any]) -> dict[str, Any] | None:
+    """Shared synthesis data for the batch groundedness view — the population
+    profile, top-driver line, and ML-cause/mitigation blocks. Both the UI card
+    (make_batch_groundedness_card) and the markdown/PDF export render from this,
+    so the two never drift. Returns None when there are no runs."""
     cr = (report or {}).get("consequence_rollup") or {}
     n = int(cr.get("n_runs", 0) or 0)
     if not n:
-        return html.Div()
+        return None
     worst_dist = cr.get("worst_distribution", {}) or {}
     conv = cr.get("convergence_distribution", {}) or {}
     gt_rate = float(cr.get("gt_corroborated_rate", 0.0) or 0.0)
@@ -8833,6 +8927,35 @@ def make_batch_groundedness_card(report: dict[str, Any]) -> html.Div:
     driver_line = ("Top drivers: " + ", ".join(f"{d} ({c}×)" for d, c in top_drivers[:4]) + "."
                    if top_drivers else "")
 
+    ml_blocks: list[dict[str, str]] = []
+    if dominant and dominant in CONSEQUENCE_ML_HYPOTHESIS:
+        h = CONSEQUENCE_ML_HYPOTHESIS[dominant]
+        ml_blocks.append({
+            "title": f"Dominant consequence — {CONSEQUENCE_LABEL[dominant]} ({worst_dist[dominant]}/{n})",
+            "hypothesis": h["hypothesis"], "mitigation": h["mitigation"]})
+    path_summary = {e["key"]: e for e in ((report or {}).get("pathology_rollup", {}) or {}).get("summary", [])}
+    for e in sorted([x for x in path_summary.values() if x.get("fired", 0) > 0],
+                    key=lambda x: -x["fired"])[:3]:
+        k = e["key"]
+        entry = PATHOLOGY_REGISTRY.get(k, {})
+        ml_blocks.append({
+            "title": f"{entry.get('label', k)} (fired in {e['fired']}/{n})",
+            "hypothesis": entry.get("ml_mechanism", ""), "mitigation": PATHOLOGY_MITIGATION.get(k, "")})
+    return {"n": n, "dominant": dominant, "profile": profile,
+            "driver_line": driver_line, "ml_blocks": ml_blocks}
+
+
+def make_batch_groundedness_card(report: dict[str, Any]) -> html.Div:
+    """Batch top card: combine every single-run synthesis into one reading of how
+    grounded the model is — population evidence, what stands out, and the most
+    plausible ML causes + candidate mitigations (hypotheses, the bridge to the
+    alignment track). Renders from compute_batch_groundedness_summary."""
+    summary = compute_batch_groundedness_summary(report)
+    if not summary:
+        return html.Div()
+    profile = summary["profile"]
+    driver_line = summary["driver_line"]
+
     def ml_block(title: str, hypothesis: str, mitigation: str) -> html.Div:
         return html.Div(
             [
@@ -8845,18 +8968,7 @@ def make_batch_groundedness_card(report: dict[str, Any]) -> html.Div:
             className="batch-ml-block",
         )
 
-    ml_blocks = []
-    if dominant and dominant in CONSEQUENCE_ML_HYPOTHESIS:
-        h = CONSEQUENCE_ML_HYPOTHESIS[dominant]
-        ml_blocks.append(ml_block(f"Dominant consequence — {CONSEQUENCE_LABEL[dominant]} ({worst_dist[dominant]}/{n})",
-                                  h["hypothesis"], h["mitigation"]))
-    path_summary = {e["key"]: e for e in ((report or {}).get("pathology_rollup", {}) or {}).get("summary", [])}
-    for e in sorted([x for x in path_summary.values() if x.get("fired", 0) > 0],
-                    key=lambda x: -x["fired"])[:3]:
-        k = e["key"]
-        entry = PATHOLOGY_REGISTRY.get(k, {})
-        ml_blocks.append(ml_block(f"{entry.get('label', k)} (fired in {e['fired']}/{n})",
-                                  entry.get("ml_mechanism", ""), PATHOLOGY_MITIGATION.get(k, "")))
+    ml_blocks = [ml_block(b["title"], b["hypothesis"], b["mitigation"]) for b in summary["ml_blocks"]]
 
     return html.Div(
         [
@@ -11422,6 +11534,20 @@ def serve_layout():
                                                             style={"display": "none"},
                                                         ),
                                                         html.Div(id="report-status", className="report-status"),
+                                                        html.Div(
+                                                            [
+                                                                html.Button(
+                                                                    "Download PDF",
+                                                                    id="download-report-pdf-button",
+                                                                    className="folder-browse-button",
+                                                                    n_clicks=0,
+                                                                ),
+                                                            ],
+                                                            className="action-row",
+                                                        ),
+                                                        dcc.Download(id="report-pdf-download"),
+                                                        # Directory of the most recently saved report (json/md/pdf)
+                                                        dcc.Store(id="report-saved-path"),
                                                         # Hidden interval that fires while a batch is active
                                                         dcc.Interval(
                                                             id="batch-interval",
@@ -14583,6 +14709,7 @@ def export_structured_response(
 @app.callback(
     Output("report-content", "children"),
     Output("report-status", "children"),
+    Output("report-saved-path", "data"),
     Input("generate-report-button", "n_clicks"),
     State("report-mode", "value"),
     State("report-folder", "value"),
@@ -14593,31 +14720,34 @@ def generate_report(n_clicks: int | None, mode: str | None, folder: str | None):
         raise dash.exceptions.PreventUpdate
 
     if mode != "existing":
-        return dash.no_update, "Batch mode is not yet implemented."
+        return dash.no_update, "Batch mode is not yet implemented.", dash.no_update
 
     folder = (folder or "").strip()
     if not folder:
-        return dash.no_update, "Provide a folder path."
+        return dash.no_update, "Provide a folder path.", dash.no_update
 
     try:
         runs, skipped = load_run_jsons(folder)
     except Exception as exc:
-        return dash.no_update, f"Failed to load runs: {exc}"
+        return dash.no_update, f"Failed to load runs: {exc}", dash.no_update
 
     if not runs:
         skipped_msg = "; ".join(f"{s['run_id']}: {s['reason']}" for s in skipped[:3])
         return (
             html.Div("No usable runs found.", className="empty-state"),
             f"No runs loaded from {folder}. Skipped: {skipped_msg or '(none)'}",
+            dash.no_update,
         )
 
     report = compute_pre_intervention_report(runs)
     findings = interpret_pre_intervention_report(report)
     panel = make_pre_intervention_report_panel(report, skipped=skipped)
 
-    # Persist JSON + Markdown alongside exports/reports/
+    # Persist JSON + Markdown + PDF alongside exports/reports/
+    saved_dir = None
     try:
         out_dir = save_report(report, findings, folder, skipped=skipped)
+        saved_dir = str(out_dir)
         save_msg = f"  Saved: {out_dir.relative_to(EXPORT_ROOT.parent) if out_dir.is_relative_to(EXPORT_ROOT.parent) else out_dir}"
     except Exception as exc:
         save_msg = f"  (save failed: {exc})"
@@ -14626,7 +14756,47 @@ def generate_report(n_clicks: int | None, mode: str | None, folder: str | None):
     if skipped:
         status += f"  Skipped {len(skipped)}."
     status += save_msg
-    return panel, status
+    return panel, status, saved_dir
+
+
+@app.callback(
+    Output("report-pdf-download", "data"),
+    Output("report-status", "children", allow_duplicate=True),
+    Input("download-report-pdf-button", "n_clicks"),
+    State("report-saved-path", "data"),
+    prevent_initial_call=True,
+)
+def download_report_pdf(n_clicks: int | None, saved_path: str | None):
+    """Stream the PDF for the most recently generated/batched report. Resolves the
+    saved report directory (this session's store, else the last batch run),
+    regenerates the PDF from its report.json so the latest renderer is used."""
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+
+    report_dir = saved_path or _BATCH_STATE.get("report_path")
+    if not report_dir:
+        return dash.no_update, "No report yet — generate one first, then download."
+
+    report_json = Path(report_dir) / "report.json"
+    if not report_json.exists():
+        return dash.no_update, f"No report.json under {report_dir}."
+
+    try:
+        payload = json.loads(report_json.read_text())
+        pdf_bytes = render_report_pdf(
+            payload.get("report", {}),
+            payload.get("findings", []),
+            payload.get("source_folder", ""),
+            payload.get("skipped", []),
+            external_tests=payload.get("external_tests", {}),
+        )
+    except Exception as exc:
+        return dash.no_update, f"PDF export failed: {exc}"
+
+    return (
+        dcc.send_bytes(lambda buf: buf.write(pdf_bytes), "pre_intervention_report.pdf"),
+        f"Downloaded PDF from {Path(report_dir).name}.",
+    )
 
 
 @app.callback(

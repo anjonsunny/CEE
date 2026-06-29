@@ -884,6 +884,11 @@ Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/sha
 - **What:** Every population surface equals an independent recompute from per-run data: `trust_distribution`, a `metric_distributions` median (trust_score), `graph_b_validity_rollup.beta_median` (sourced from `pre_intervention_trust.components.b_validity_beta`), and `consequence_rollup.convergence_distribution` (keyed on `n_convergence`, the int).
 - **Severity:** BLOCKING. **Status:** auto.
 
+### S30 — Batch report PDF export (complete content)
+- **What:** The batch report exports to PDF carrying the FULL consequence-first content. Locks: `render_report_pdf` returns valid `%PDF-` bytes (markdown → HTML via `markdown` lib → PDF via `xhtml2pdf`, pure-python, no native deps); `render_report_markdown` (the PDF source) now includes the "How grounded is the model? (combined)" + "Consequence rollup (population synthesis)" sections + ML cause/mitigation lines (previously missing — the markdown predated the consequence-first conversion); `save_report` writes report.json + report.md + report.pdf; `compute_batch_groundedness_summary` is the single shared source for both the UI card (`make_batch_groundedness_card`) and the markdown/PDF, so screen and export can't drift; empty report → summary None + empty card.
+- **Why:** User asked whether the batch run exports correctly to PDF. There was NO PDF export at all, and the saved markdown was stale (missing the groundedness card + consequence rollup — the headline batch synthesis). This adds a real PDF export (auto-saved + a Download PDF button) and locks completeness.
+- **Severity:** BLOCKING. **Status:** auto.
+
 ### S8 — Meaning hierarchy renders in the trust card
 - **What:** `make_pre_intervention_trust_panel` renders the top verdict ("Bottom line — worst consequence") plus a collapsible "By section" tier-2 breakdown (each section's own verdict).
 - **Severity:** BLOCKING. **Status:** auto.

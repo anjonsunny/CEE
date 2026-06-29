@@ -465,6 +465,45 @@ def test_s27_batch_aggregation_correctness(main_module):
 
 
 @pytest.mark.blocking
+def test_s30_batch_pdf_export(main_module, tmp_path):
+    """Batch report exports to PDF with the FULL consequence-first content. Locks:
+    render_report_pdf returns valid PDF bytes; the markdown (PDF source) carries
+    the groundedness + consequence-rollup sections that the UI panel shows (no
+    stale export); save_report writes report.pdf; the groundedness summary is a
+    single shared source for card + markdown so they can't drift."""
+    m = main_module
+    runs = []
+    for sr in _load().values():
+        r = m.normalize_result(dict(sr))
+        r["disaster_scenario"] = "Yes"
+        runs.append(r)
+    rep = m.compute_pre_intervention_report(runs)
+    findings = m.interpret_pre_intervention_report(rep)
+
+    # markdown (the PDF source) must include the NEW consequence-first sections
+    md = m.render_report_markdown(rep, findings, "fixtures")
+    assert "## How grounded is the model? (combined across runs)" in md
+    assert "## Consequence rollup (population synthesis)" in md
+    assert "Likely ML cause:" in md   # ML hypothesis/mitigation carried into the doc
+
+    # PDF bytes are a real PDF
+    pdf = m.render_report_pdf(rep, findings, "fixtures")
+    assert pdf[:5] == b"%PDF-" and len(pdf) > 1000
+
+    # save_report writes all three artefacts
+    out = m.save_report(rep, findings, "fixtures", out_root=tmp_path)
+    names = {p.name for p in out.iterdir()}
+    assert {"report.json", "report.md", "report.pdf"} <= names
+    assert (out / "report.pdf").read_bytes()[:5] == b"%PDF-"
+
+    # shared summary drives BOTH the UI card and the markdown (no drift)
+    summary = m.compute_batch_groundedness_summary(rep)
+    assert summary and summary["profile"] in md
+    assert m.compute_batch_groundedness_summary({}) is None   # empty -> no card
+    assert m.make_batch_groundedness_card({}).children in (None, [], "")  # empty Div
+
+
+@pytest.mark.blocking
 def test_s28_full_rule_and_failure_coverage(main_module):
     """DEEP coverage: every one of the 19 conformance rules and 29 alignment
     failures actually triggers — the ones fixtures never exercise are driven by
