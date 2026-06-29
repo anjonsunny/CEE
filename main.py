@@ -8043,6 +8043,44 @@ def _read_sidecar_caption(img_path: Path) -> str:
     return ""
 
 
+def _load_caption_manifests(root: Path | None) -> dict[str, str]:
+    """Collect image->caption maps from any captions.json under the batch root.
+
+    A folder-level `captions.json` ({image_basename: caption}) lets a batch carry
+    realistic field captions without one sidecar .txt per image. Keys are matched
+    by basename, so a manifest at the root covers images in subfolders too;
+    deeper manifests win on conflict. Read once per batch. Tolerant of a missing
+    or malformed file (returns what it can).
+    """
+    mapping: dict[str, str] = {}
+    if not root or not Path(root).exists():
+        return mapping
+    for jf in sorted(Path(root).rglob("captions.json"), key=lambda p: len(p.parts)):
+        try:
+            data = json.loads(jf.read_text())
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, str) and v.strip():
+                    mapping[Path(str(k)).name] = v.strip()
+    return mapping
+
+
+def resolve_batch_caption(
+    img_path: Path,
+    manifest: dict[str, str],
+    use_sidecar: bool,
+) -> str:
+    """Caption for one batch image. A per-image sidecar .txt (when enabled) wins;
+    otherwise fall back to the folder-level captions.json manifest."""
+    if use_sidecar:
+        sidecar = _read_sidecar_caption(img_path)
+        if sidecar:
+            return sidecar
+    return manifest.get(img_path.name, "")
+
+
 def summarize_folder(path: str | Path) -> dict[str, Any]:
     """Inspect a folder and return navigation info for the browser UI.
 
@@ -8638,11 +8676,15 @@ def _run_batch_worker(
             "started_at": datetime.now().isoformat(timespec="seconds"),
         })
 
+    # Folder-level captions.json (if any) — realistic field captions without one
+    # sidecar .txt per image. Read once; per-image sidecar still overrides below.
+    caption_manifest = _load_caption_manifests(images_root or out_dir)
+
     for img_path in images:
         with _BATCH_LOCK:
             _BATCH_STATE["current"] = img_path.name
 
-        caption = _read_sidecar_caption(img_path) if use_sidecar else ""
+        caption = resolve_batch_caption(img_path, caption_manifest, use_sidecar)
         category = _infer_disaster_category(img_path, images_root) if images_root else ""
         ok, err = _process_one_image(img_path, caption, allow_inferred, out_dir, category=category)
         with _BATCH_LOCK:

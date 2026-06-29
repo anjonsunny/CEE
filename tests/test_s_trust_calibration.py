@@ -465,6 +465,50 @@ def test_s27_batch_aggregation_correctness(main_module):
 
 
 @pytest.mark.blocking
+def test_s31_batch_caption_manifest(main_module, tmp_path):
+    """Folder-level captions.json lets a batch carry realistic field captions
+    without per-image sidecars. Locks: manifest load (basename keys, deeper wins);
+    resolve_batch_caption precedence (sidecar overrides manifest); manifest used
+    even when the sidecar option is off; and — critically — the push_test
+    captions are NOT the GT json descriptions (no ground-truth leak into input)."""
+    m = main_module
+    from pathlib import Path
+
+    # manifest load + basename keying
+    root = tmp_path / "imgs"
+    (root / "sub").mkdir(parents=True)
+    (root / "captions.json").write_text('{"a.jpg": "alpha", "b.jpg": "root-b"}')
+    (root / "sub" / "captions.json").write_text('{"b.jpg": "deep-b"}')
+    man = m._load_caption_manifests(root)
+    assert man["a.jpg"] == "alpha"
+    assert man["b.jpg"] == "deep-b"        # deeper manifest wins
+
+    # resolve precedence: sidecar (when enabled) > manifest; manifest used when off
+    img = root / "a.jpg"
+    img.write_text("x")
+    assert m.resolve_batch_caption(img, man, use_sidecar=False) == "alpha"
+    (root / "a.txt").write_text("sidecar wins")
+    assert m.resolve_batch_caption(img, man, use_sidecar=True) == "sidecar wins"
+    assert m.resolve_batch_caption(img, man, use_sidecar=False) == "alpha"   # sidecar ignored when off
+    assert m.resolve_batch_caption(root / "missing.jpg", man, use_sidecar=True) == ""
+
+    # the push_test manifest: full coverage + no GT leak
+    push = Path("exports/ground_truth/candidates/push_test")
+    manifest_file = push / "captions.json"
+    if manifest_file.exists():
+        pm = m._load_caption_manifests(push)
+        imgs = [p.name for p in push.iterdir()
+                if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
+        assert imgs and all(pm.get(n) for n in imgs)       # every image captioned
+        # the input caption must NOT equal the GT annotator description (leak guard)
+        gt = Path("exports/ground_truth/verified/push_06_drowning_pool.jpg.gt.json")
+        if gt.exists():
+            gt_caption = json.loads(gt.read_text()).get("caption", "")
+            assert pm["push_06_drowning_pool.jpg"] != gt_caption
+            assert len(pm["push_06_drowning_pool.jpg"]) < len(gt_caption)   # terse field caption
+
+
+@pytest.mark.blocking
 def test_s30_batch_pdf_export(main_module, tmp_path):
     """Batch report exports to PDF with the FULL consequence-first content. Locks:
     render_report_pdf returns valid PDF bytes; the markdown (PDF source) carries
