@@ -77,6 +77,8 @@ CEE+ positions itself on **Pearl's Ladder of Causation**. Rung 1 = association (
 
 **The CEE+ pipeline is a counterfactual pipeline, not an intervention pipeline.** Conditioning on a specific scene = implicit abduction (VLM scene grounding fixes U); suppression = action (the do() step); measured shifts = unit-specific prediction. The "intervention type" (source-removal / edge-severance / target-mitigation) is the *shape* of the do() inside each counterfactual query.
 
+**Graph A and Graph B are BOTH rung-1 declarations — neither is mechanistic.** A declarative artifact is anything the model emits (or a deterministic function of it): a static assertion, not a tested dependency. By that criterion Graph A, Graph B, the framework pick (a ranking of A), and `graph_b.suppression_pick` are ALL declarative. The honest distinction is *coupling to the action*, not declarative-vs-mechanistic: **Graph A = declaration coupled to the action** (derived from the recs); **Graph B = declaration decoupled from the action** (elicited independently, without the recs). Calling B "mechanistic" is wrong and self-undermining (it would grant rung-3 status to a static emitted graph, the exact masquerade we exist to expose). The ONLY mechanistic artifact in the pipeline is the **operative core**, which does not exist until the do(): mechanism = the recommendation moves when the hazard is suppressed. Pre-intervention A-vs-B is therefore a *consistency check between two declarations*, qualified by GT — it is fine and useful as that, but it is not a rung-3 signal.
+
 ### Two orthogonal axes
 
 **Axis A — Suppression structure (depth of the counterfactual):**
