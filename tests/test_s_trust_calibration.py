@@ -366,6 +366,34 @@ def test_s17_meaning_cards(main_module):
 
 
 @pytest.mark.blocking
+def test_s21_accuracy_vs_gt(main_module):
+    """Accuracy / Test 1: reuse the diff machinery, NEW consequences vs GT (truth).
+    missed → under-treated, fabricated → non-threat (confirmed, NOT unknown);
+    matched → correct (green)."""
+    m = main_module
+    gv = {"available": True, "b_correctness": 0.5, "b_precision": 0.6,
+          "b_edge_diff": {
+              "missed": [{"source": "fire_1", "target": "tanker_1", "effect": "worsens", "via_state": "spreading"}],
+              "spurious": [{"source": "fire_1", "target": "person_1", "effect": "may_harm", "via_state": "burning"}],
+              "matched": [{"source": "fire_1", "target": "house_1", "effect": "may_harm", "via_state": "burning"}],
+          }}
+    acc = m.enumerate_gt_accuracy(gv)
+    types = [e["type"] for e in acc["errors"]]
+    assert "gt_missed_danger" in types and "gt_fabricated_hazard" in types
+    # GT is truth → confirmed consequences, NOT unknown
+    assert m.consequence_score("gt_missed_danger") == 0.6          # under-treated
+    assert m.consequence_score("gt_fabricated_hazard") == 0.3      # non-threat
+    assert not m.is_unknown_impact("gt_fabricated_hazard")         # confirmed, not unknown
+    assert any(x["kind"] == "gt_correct" for x in acc["matches"])
+
+    meaning = m.make_accuracy_meaning(gv)
+    assert meaning["verdict"]["worst_category"] == "under_response"
+    assert "missed" in meaning["verdict"]["takeaway"] and "fabricated" in meaning["verdict"]["takeaway"]
+    # no verified GT → graceful
+    assert m.make_accuracy_meaning({"available": False})["verdict"]["worst_category"] is None
+
+
+@pytest.mark.blocking
 def test_s20_pathology_observation_format(main_module):
     """Pathology section uses its own observation format (not victim-cost): each
     pathology has a possible_impact + affected_entity; the top card surfaces

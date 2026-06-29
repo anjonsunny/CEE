@@ -3818,6 +3818,10 @@ CONSEQUENCE_CATEGORY: dict[str, str] = {
     "ab_edge_unconfirmed": "unknown",          # only_in_a edge: link B doesn't confirm
     "ab_effect_disputed": "unknown",           # same link, A/B disagree on the harm mechanism
     "ab_flag_unconfirmed": "unknown",          # A flags a hazard B doesn't confirm
+    # --- Accuracy / Test 1 (model graph vs VERIFIED ground truth). GT is truth,
+    #     so model-only is a CONFIRMED fabrication (not unknown like A↔B). ---
+    "gt_missed_danger": "under_response",      # in GT, not in model: a real danger the model missed
+    "gt_fabricated_hazard": "wasted_response", # in model, not in GT: a confirmed false hazard
     # --- Unknown impact (uninterpretable reasoning garble; not a victim cost,
     #     flagged separately, penalty lands on trust via conformance) ---
     "effect_not_in_vocabulary": "unknown",
@@ -3884,6 +3888,9 @@ CONSEQUENCE_EXPLANATION = {
     "ab_edge_unconfirmed": "the recommendations claim this link, but the independent mechanism graph doesn't back it; we can't tell if it's a real protective action or a fabrication, so it doesn't get a victim cost — it counts against trust instead",
     "ab_effect_disputed": "both graphs see this link but disagree on how it harms; we can't tell which is right, so it counts against trust, not as a victim cost",
     "ab_flag_unconfirmed": "the recommendations treat this as a hazard, but the mechanism doesn't confirm it; unverified, so it counts against trust, not as a victim cost",
+    # Accuracy / Test 1
+    "gt_missed_danger": "the verified answer key has this danger link, but the model didn't draw it — a real hazard the response won't address",
+    "gt_fabricated_hazard": "the model drew this link, but the verified answer key says it isn't real — a confirmed false hazard, so responders are sent after nothing",
     # slowed response (garbled / padded brief)
     "duplicate_recommendation_quad": "the same action is listed twice, padding the brief and slowing triage",
     "redundant_instancing": "the same thing is modeled twice, cluttering the brief",
@@ -3960,6 +3967,9 @@ FAILURE_PHRASE = {
     "ab_edge_unconfirmed": "link not confirmed by mechanism",
     "ab_effect_disputed": "disputed harm mechanism",
     "ab_flag_unconfirmed": "hazard not confirmed by mechanism",
+    # Accuracy / Test 1 (vs verified ground truth)
+    "gt_missed_danger": "real danger missed",
+    "gt_fabricated_hazard": "fabricated hazard (not real)",
     # unknown impact (uninterpretable)
     "effect_not_in_vocabulary": "unknown effect label",
     "out_of_vocabulary_state": "unknown state word",
@@ -4072,13 +4082,60 @@ def make_ab_section_meaning(consistency: dict[str, Any]) -> dict[str, Any]:
     return {"verdict": {**sv, "takeaway": sentence}, "errors": errors, "matches": matches}
 
 
+def enumerate_gt_accuracy(gv: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Turn the model-vs-verified-GT edge diff into typed errors + matches. GT is
+    TRUTH, so model-only is a confirmed fabrication (not unknown like A↔B)."""
+    d = (gv or {}).get("b_edge_diff", {}) or {}
+    errors: list[dict[str, Any]] = []
+    for e in (d.get("missed", []) or []):
+        errors.append({"type": "gt_missed_danger", "detail": _fmt_ab_edge(e)})
+    for e in (d.get("spurious", []) or []):
+        errors.append({"type": "gt_fabricated_hazard", "detail": _fmt_ab_edge(e)})
+    matches = [{"kind": "gt_correct", "tag": "correct", "detail": _fmt_ab_edge(e),
+                "meaning": "correct — this causal link is confirmed by the verified answer key"}
+               for e in (d.get("matched", []) or [])]
+    return {"errors": errors, "matches": matches}
+
+
+def make_accuracy_meaning(gv: dict[str, Any]) -> dict[str, Any]:
+    """Accuracy / Test 1 higher-level meaning: the worst-consequence verdict vs
+    the verified GT + a recall/precision-framed sentence, plus errors/matches."""
+    gv = gv or {}
+    if not gv.get("available"):
+        return {"available": False, "errors": [], "matches": [],
+                "verdict": {"worst_category": None, "worst_impact": 0.0,
+                            "takeaway": "No verified ground truth for this scene — accuracy not measured.",
+                            "pills": [{"label": "no answer key", "count": 0, "color": "grey",
+                                       "tooltip": "No GT graph to compare against."}]}}
+    acc = enumerate_gt_accuracy(gv)
+    errors, matches = acc["errors"], acc["matches"]
+    sv = consequence_verdict_for([str(e["type"]) for e in errors])
+    recall = float(gv.get("b_correctness", 0.0) or 0.0)
+    precision = float(gv.get("b_precision", 0.0) or 0.0)
+    n_missed = sum(1 for e in errors if e["type"] == "gt_missed_danger")
+    n_fab = sum(1 for e in errors if e["type"] == "gt_fabricated_hazard")
+    worst = sv.get("worst_category")
+    if not worst:
+        sentence = (f"Matches the verified answer key (recall {recall:.0%}, precision {precision:.0%}) — "
+                    "the model's causal account is correct.")
+    else:
+        phrase = CONSEQUENCE_LABEL.get(worst, "a problem")
+        verdict = ("the model's account is materially wrong" if sv.get("worst_impact", 0.0) >= 0.5
+                   else "mostly correct, with minor gaps")
+        sentence = (f"vs the answer key: {n_missed} real danger(s) missed, {n_fab} fabricated "
+                    f"(recall {recall:.0%}, precision {precision:.0%}); the worst means {phrase}"
+                    f"{_driver_clause(sv)} (total victim cost {sv.get('total_cost', 0.0):.1f}), so {verdict}.")
+    return {"available": True, "errors": errors, "matches": matches,
+            "verdict": {**sv, "takeaway": sentence}}
+
+
 def render_ab_low_level(errors: list[dict[str, Any]], matches: list[dict[str, Any]]) -> Any:
     """Low-level A↔B rows: matches first (green, grounded), then errors
     (failure phrase → consequence · weight), each with the edge as a muted line."""
     rows: list[Any] = []
     for mt in matches:
         rows.append(html.Li([
-            html.Div([html.Span("grounded", className="cons-tag cons-green"),
+            html.Div([html.Span(mt.get("tag", "grounded"), className="cons-tag cons-green"),
                       html.Span(mt.get("meaning", ""), className="failure-phrase-text")],
                      className="failure-main-line"),
             html.Div(mt.get("detail", ""), className="failure-tech-line"),
@@ -8450,6 +8507,7 @@ def make_gt_validation_panel(gt_validation: dict[str, Any]) -> html.Div:
     n_gt = gt_validation["n_edges_gt"]
     n_a = gt_validation["n_edges_a"]
     n_b = gt_validation["n_edges_b"]
+    acc_meaning = make_accuracy_meaning(gt_validation)
 
     def score_pill(value: float) -> str:
         if value >= 0.85: return "score-high"
@@ -8540,6 +8598,23 @@ def make_gt_validation_panel(gt_validation: dict[str, Any]) -> html.Div:
                     ),
                 ],
                 className="gt-val-explainer",
+            ),
+
+            # Consequence-first: verdict card (vs the answer key) + low-level
+            # missed/fabricated errors and correct matches.
+            html.Div(
+                [
+                    html.Div("What this section means for trust", className="trust-section-label"),
+                    *render_meaning_cards(acc_meaning["verdict"]),
+                ],
+                className="alignment-consequence-verdict",
+            ),
+            html.Div(
+                [
+                    html.Div("Vs the verified answer key (Graph B)", className="trust-section-label"),
+                    render_ab_low_level(acc_meaning["errors"], acc_meaning["matches"]),
+                ],
+                className="diff-list alignment-failures",
             ),
 
             html.Div(
@@ -14055,7 +14130,7 @@ def render_results(
         normalized.get("pre_internal_alignment", {}), normalized.get("graph_consistency", {}))
     conformance_meaning = render_meaning_cards(make_conformance_meaning(normalized.get("rule_conformance", {}))["verdict"])
     pathology_meaning = make_pathology_section_meaning(normalized.get("pathologies", {}))
-    accuracy_meaning = render_meaning_header(sm.get("accuracy") or generate_accuracy_meaning(normalized.get("gt_validation", {}), normalized.get("rule_conformance", {})))
+    accuracy_meaning = render_meaning_cards(make_accuracy_meaning(normalized.get("gt_validation", {}))["verdict"])
     # Persisted in normalize_result; fall back to computing if absent (old data).
     consequence_verdict = normalized.get("consequence_verdict") or generate_consequence_verdict(
         normalized.get("pre_internal_alignment", {}), normalized.get("rule_conformance", {}),
