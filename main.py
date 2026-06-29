@@ -4034,14 +4034,24 @@ def enumerate_ab_consistency(gc: dict[str, Any]) -> dict[str, list[dict[str, Any
                        "detail": f"{d.get('source', '?')} → {d.get('target', '?')}: "
                                  f"A {','.join(d.get('graph_a_effects', []))} vs "
                                  f"B {','.join(d.get('graph_b_effects', []))}"})
-    for e in only_b:
-        if (str(e.get("source", "")), str(e.get("target", ""))) in disputed:
-            continue
-        errors.append({"type": "ab_edge_unaddressed", "detail": _fmt_ab_edge(e)})
-    for e in only_a:
-        if (str(e.get("source", "")), str(e.get("target", ""))) in disputed:
-            continue
-        errors.append({"type": "ab_edge_unconfirmed", "detail": _fmt_ab_edge(e)})
+    # Dedup edge errors by their hazard (source): one hazard spanning many edges
+    # is ONE danger, not N (count distinct hazards, not edges).
+    def by_hazard(edges: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for e in edges:
+            if (str(e.get("source", "")), str(e.get("target", ""))) in disputed:
+                continue
+            groups.setdefault(str(e.get("source", "")), []).append(e)
+        return groups
+
+    for src, edges in sorted(by_hazard(only_b).items()):
+        errors.append({"type": "ab_edge_unaddressed", "hazard": src,
+                       "detail": f"{src}: {len(edges)} link(s) the recs ignore — "
+                                 + "; ".join(_fmt_ab_edge(e) for e in edges)})
+    for src, edges in sorted(by_hazard(only_a).items()):
+        errors.append({"type": "ab_edge_unconfirmed", "hazard": src,
+                       "detail": f"{src}: {len(edges)} link(s) the mechanism doesn't confirm — "
+                                 + "; ".join(_fmt_ab_edge(e) for e in edges)})
     for f in flags:
         if f.get("agree"):
             continue
