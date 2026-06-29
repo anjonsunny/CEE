@@ -373,13 +373,21 @@ def test_s21_accuracy_vs_gt(main_module):
     m = main_module
     gv = {"available": True, "b_correctness": 0.5, "b_precision": 0.6,
           "b_edge_diff": {
-              "missed": [{"source": "fire_1", "target": "tanker_1", "effect": "worsens", "via_state": "spreading"}],
-              "spurious": [{"source": "fire_1", "target": "person_1", "effect": "may_harm", "via_state": "burning"}],
+              "missed": [{"source": "fire_1", "target": "tanker_1", "effect": "worsens", "via_state": "spreading"},
+                         # same source→target as a spurious edge below → wrong-effect, not missed+fabricated
+                         {"source": "house_1", "target": "house_2", "effect": "worsens", "via_state": "burning"}],
+              "spurious": [{"source": "fire_1", "target": "person_1", "effect": "may_harm", "via_state": "burning"},
+                           {"source": "house_1", "target": "house_2", "effect": "may_spread_to", "via_state": "burning"}],
               "matched": [{"source": "fire_1", "target": "house_1", "effect": "may_harm", "via_state": "burning"}],
           }}
     acc = m.enumerate_gt_accuracy(gv)
     types = [e["type"] for e in acc["errors"]]
-    assert "gt_missed_danger" in types and "gt_fabricated_hazard" in types
+    # house_1→house_2 appears in both missed and spurious → deduped to ONE wrong-effect
+    assert types.count("gt_wrong_effect") == 1
+    assert m.consequence_score("gt_wrong_effect") == 0.1          # right link, wrong label
+    # the genuine ones survive (fire_1→tanker_1 missed, fire_1→person_1 fabricated)
+    assert types.count("gt_missed_danger") == 1
+    assert types.count("gt_fabricated_hazard") == 1
     # GT is truth → confirmed consequences, NOT unknown
     assert m.consequence_score("gt_missed_danger") == 0.6          # under-treated
     assert m.consequence_score("gt_fabricated_hazard") == 0.3      # non-threat

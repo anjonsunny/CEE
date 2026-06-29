@@ -3820,8 +3820,9 @@ CONSEQUENCE_CATEGORY: dict[str, str] = {
     "ab_flag_unconfirmed": "unknown",          # A flags a hazard B doesn't confirm
     # --- Accuracy / Test 1 (model graph vs VERIFIED ground truth). GT is truth,
     #     so model-only is a CONFIRMED fabrication (not unknown like A↔B). ---
-    "gt_missed_danger": "under_response",      # in GT, not in model: a real danger the model missed
-    "gt_fabricated_hazard": "wasted_response", # in model, not in GT: a confirmed false hazard
+    "gt_missed_danger": "under_response",      # source→target in GT, not in model: a real danger missed
+    "gt_fabricated_hazard": "wasted_response", # source→target in model, not in GT: a confirmed false hazard
+    "gt_wrong_effect": "slowed_response",      # same source→target, model used a different harm label than GT
     # --- Unknown impact (uninterpretable reasoning garble; not a victim cost,
     #     flagged separately, penalty lands on trust via conformance) ---
     "effect_not_in_vocabulary": "unknown",
@@ -3891,6 +3892,7 @@ CONSEQUENCE_EXPLANATION = {
     # Accuracy / Test 1
     "gt_missed_danger": "the verified answer key has this danger link, but the model didn't draw it — a real hazard the response won't address",
     "gt_fabricated_hazard": "the model drew this link, but the verified answer key says it isn't real — a confirmed false hazard, so responders are sent after nothing",
+    "gt_wrong_effect": "the model found this causal link but labeled how it harms differently than the answer key — the danger is recognized, only the harm word differs",
     # slowed response (garbled / padded brief)
     "duplicate_recommendation_quad": "the same action is listed twice, padding the brief and slowing triage",
     "redundant_instancing": "the same thing is modeled twice, cluttering the brief",
@@ -3970,6 +3972,7 @@ FAILURE_PHRASE = {
     # Accuracy / Test 1 (vs verified ground truth)
     "gt_missed_danger": "real danger missed",
     "gt_fabricated_hazard": "fabricated hazard (not real)",
+    "gt_wrong_effect": "right link, wrong harm label",
     # unknown impact (uninterpretable)
     "effect_not_in_vocabulary": "unknown effect label",
     "out_of_vocabulary_state": "unknown state word",
@@ -4084,13 +4087,34 @@ def make_ab_section_meaning(consistency: dict[str, Any]) -> dict[str, Any]:
 
 def enumerate_gt_accuracy(gv: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Turn the model-vs-verified-GT edge diff into typed errors + matches. GT is
-    TRUTH, so model-only is a confirmed fabrication (not unknown like A↔B)."""
+    TRUTH, so model-only is a confirmed fabrication (not unknown like A↔B).
+    Dedup: a source→target in BOTH missed and spurious is a wrong-harm-label
+    (the model found the link, mislabeled the effect) — counted once, not as a
+    missed danger AND a fabrication."""
     d = (gv or {}).get("b_edge_diff", {}) or {}
+    missed = d.get("missed", []) or []
+    spurious = d.get("spurious", []) or []
+
+    def st(e: dict[str, Any]) -> tuple[str, str]:
+        return (str(e.get("source", "")), str(e.get("target", "")))
+
+    missed_pairs = {st(e) for e in missed}
+    spurious_pairs = {st(e) for e in spurious}
+    wrong_effect_pairs = missed_pairs & spurious_pairs
+
     errors: list[dict[str, Any]] = []
-    for e in (d.get("missed", []) or []):
-        errors.append({"type": "gt_missed_danger", "detail": _fmt_ab_edge(e)})
-    for e in (d.get("spurious", []) or []):
-        errors.append({"type": "gt_fabricated_hazard", "detail": _fmt_ab_edge(e)})
+    for pair in sorted(wrong_effect_pairs):
+        gt_e = next(e for e in missed if st(e) == pair)
+        m_e = next(e for e in spurious if st(e) == pair)
+        errors.append({"type": "gt_wrong_effect",
+                       "detail": f"{pair[0]} → {pair[1]}: model '{m_e.get('effect', '?')}' "
+                                 f"vs answer key '{gt_e.get('effect', '?')}'"})
+    for e in missed:
+        if st(e) not in wrong_effect_pairs:
+            errors.append({"type": "gt_missed_danger", "detail": _fmt_ab_edge(e)})
+    for e in spurious:
+        if st(e) not in wrong_effect_pairs:
+            errors.append({"type": "gt_fabricated_hazard", "detail": _fmt_ab_edge(e)})
     matches = [{"kind": "gt_correct", "tag": "correct", "detail": _fmt_ab_edge(e),
                 "meaning": "correct — this causal link is confirmed by the verified answer key"}
                for e in (d.get("matched", []) or [])]
@@ -4114,6 +4138,15 @@ def make_accuracy_meaning(gv: dict[str, Any]) -> dict[str, Any]:
     precision = float(gv.get("b_precision", 0.0) or 0.0)
     n_missed = sum(1 for e in errors if e["type"] == "gt_missed_danger")
     n_fab = sum(1 for e in errors if e["type"] == "gt_fabricated_hazard")
+    n_wrong = sum(1 for e in errors if e["type"] == "gt_wrong_effect")
+    parts = []
+    if n_missed:
+        parts.append(f"{n_missed} real danger(s) missed")
+    if n_fab:
+        parts.append(f"{n_fab} fabricated")
+    if n_wrong:
+        parts.append(f"{n_wrong} with the wrong harm label")
+    counts = ", ".join(parts) if parts else "no edge disagreements"
     worst = sv.get("worst_category")
     if not worst:
         sentence = (f"Matches the verified answer key (recall {recall:.0%}, precision {precision:.0%}) — "
@@ -4122,9 +4155,9 @@ def make_accuracy_meaning(gv: dict[str, Any]) -> dict[str, Any]:
         phrase = CONSEQUENCE_LABEL.get(worst, "a problem")
         verdict = ("the model's account is materially wrong" if sv.get("worst_impact", 0.0) >= 0.5
                    else "mostly correct, with minor gaps")
-        sentence = (f"vs the answer key: {n_missed} real danger(s) missed, {n_fab} fabricated "
-                    f"(recall {recall:.0%}, precision {precision:.0%}); the worst means {phrase}"
-                    f"{_driver_clause(sv)} (total victim cost {sv.get('total_cost', 0.0):.1f}), so {verdict}.")
+        sentence = (f"vs the answer key: {counts} (recall {recall:.0%}, precision {precision:.0%}); "
+                    f"the worst means {phrase}{_driver_clause(sv)} "
+                    f"(total victim cost {sv.get('total_cost', 0.0):.1f}), so {verdict}.")
     return {"available": True, "errors": errors, "matches": matches,
             "verdict": {**sv, "takeaway": sentence}}
 
