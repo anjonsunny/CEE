@@ -312,6 +312,64 @@ def test_render_do_prompt_does_not_leak_gt_specific_content(tmp_path):
     assert GT_ONLY_OBJECT_ID not in blob, "GT-only object id leaked into the do-prompt"
 
 
+def test_render_do_prompt_embeds_baseline_objects_and_reuse_instruction(tmp_path):
+    """EMBED-BASELINE (A3/B5/B8): the do-prompt embeds the model's OWN baseline — EVERY
+    detected_object id and a Graph-A edge token — and instructs reuse / hold-fixed, so the
+    stateless VLM can hold U instead of re-reading the scene. The embed must still carry
+    NO GT-specific content (embedding model-authored content must not regress the leak
+    guard)."""
+    baseline, spec = _spec_for(tmp_path)
+    out = intervention.render_do_prompt(baseline, spec)
+    blob = out["prompt"]
+
+    # (a) every baseline detected_object id appears (the U anchor).
+    base_ids = [o["object_id"] for o in baseline["detected_objects"]]
+    assert base_ids, "fixture must have detected_objects for this test to be meaningful"
+    for oid in base_ids:
+        assert oid in blob, f"baseline object id {oid} not embedded in do-prompt"
+    assert "flood_1" in blob and "person_1" in blob  # explicit on the make_result fixture
+
+    # (b) a Graph-A edge token appears (coupling cue from the model's own graph).
+    edges = baseline["graph_a"].get("edges") or []
+    assert edges, "fixture must have graph_a edges"
+    assert edges[0]["target"] in blob  # e.g. the edge's target id is summarized
+
+    # (c) a reuse / hold-fixed instruction is present.
+    low = blob.lower()
+    assert "reuse" in low
+    assert ("hold" in low and "fixed" in low)
+
+    # (d) leak guard still holds on the now-larger blob (no answer-key content embedded).
+    full = out["prompt"] + " " + out["suppression_statement"]
+    assert GT_ONLY_CAPTION not in full
+    assert GT_ONLY_OBJECT_ID not in full
+
+
+def test_render_do_prompt_does_not_pin_recs_or_edges_to_baseline(tmp_path):
+    """B8 construct guard: the embed pins U (entities/states), NOT the action. The prompt
+    must EXPECT the recommendations and causal edges to change where they depended on the
+    suppressed hazard, so a grounded suppression is not biased into a false 'static'."""
+    baseline, spec = _spec_for(tmp_path)
+    blob = intervention.render_do_prompt(baseline, spec)["prompt"].lower()
+    assert "re-derived" in blob or "re-derive" in blob
+    assert "expected to change" in blob
+
+
+def test_render_do_prompt_empty_baseline_is_well_formed(tmp_path):
+    """A4 edge-input safety: empty detected_objects / edgeless graph_a must NOT crash or
+    emit a dangling 'reuse these ids:' with no list; the suppression statement + JSON-key
+    spec stay unconditional so the prompt is always well-formed."""
+    empty_baseline = {"detected_objects": [], "graph_a": {"nodes": [], "edges": []}}
+    spec = {"target": {"object_id": "flood_1", "state": "engulfing"},
+            "intervention_type": "edge_severance"}
+    out = intervention.render_do_prompt(empty_baseline, spec)
+    assert isinstance(out["prompt"], str) and out["prompt"]
+    assert "flood_1" in out["prompt"]              # target still named
+    assert '"detected_objects"' in out["prompt"]   # JSON-key spec unconditional
+    # no dangling empty entity list: the no-entities branch says so explicitly.
+    assert "no other tracked entities" in out["prompt"].lower()
+
+
 # ---------------------------------------------------------------------------
 # step 4 — run_counterfactual
 # ---------------------------------------------------------------------------
@@ -1153,3 +1211,138 @@ def test_unused_candidates_selection_key_is_flagged(tmp_path):
     selections = {"modality": "language", "candidates": [{"object_id": "ignored"}]}
     out = intervention.run_intervention(baseline, selections, make_vlm_stub(raw_post))
     assert out["selection_notes"]["candidates_arg_ignored"] is True
+
+
+# ---------------------------------------------------------------------------
+# C4 / B9 — discrimination is void-aware; leaked arm signals carry the marker
+# ---------------------------------------------------------------------------
+def test_discrimination_is_void_when_core_leaks(tmp_path):
+    """C4: on a leaked core arm, discrimination must NOT emit a true/false `discriminates`
+    verdict off invalid comparisons. It nulls discriminates and flags comparison_invalid
+    with a reason, while keeping the raw shift numbers for audit. B9: the leaked core
+    signals carry a comparison_invalid marker so the numbers never outlive the void
+    unflagged."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    # A post that leaks U on every arm (wholesale scene re-read).
+    leaked_post = {
+        "detected_objects": [{"object_id": "stranger_1", "label": "tree", "state": "x"},
+                             {"object_id": "stranger_2", "label": "rock", "state": "y"}],
+        "causal_graph": {"nodes": [], "edges": []},
+        "recommendations": [],
+        "disaster_level": 0,
+    }
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(leaked_post))
+    assert out["u_check"]["leaked"] is True
+    d = out["discrimination"]
+    assert d["discriminates"] is None
+    assert d["comparison_invalid"] is True
+    assert d["comparison_invalid_reason"] in {"core_leaked", "both_leaked"}
+    # raw numbers retained for audit (not silently dropped)
+    assert "core_content_shift" in d
+    # B9: the persisted core signals carry the void marker.
+    assert out["signals"].get("comparison_invalid") is True
+
+
+# ---------------------------------------------------------------------------
+# C3 — non-high baseline trust qualifies the verdict with a caveat
+# ---------------------------------------------------------------------------
+def test_verdict_carries_trust_caveat_when_trust_moderate(tmp_path):
+    """C3: a moderate/low baseline trust must qualify the read — verdict.trust_caveat True
+    and the explanation states the read is provisional."""
+    gt_dir = write_gt_dir(tmp_path)
+    result = make_result()
+    result["pre_intervention_trust"] = {"score": 0.85, "level": "moderate"}
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir)
+    raw_post = {"detected_objects": make_result()["detected_objects"],
+                "causal_graph": make_result()["causal_graph"],
+                "recommendations": make_result()["recommendations"], "disaster_level": 8}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    v = out["verdict"]
+    assert v.get("trust_caveat") is True
+    assert "provisional" in v.get("explanation", "").lower()
+
+
+def test_verdict_no_trust_caveat_when_trust_high(tmp_path):
+    """C3: a high (or unknown) baseline trust adds NO caveat — trust_caveat False."""
+    gt_dir = write_gt_dir(tmp_path)
+    result = make_result()
+    result["pre_intervention_trust"] = {"score": 0.95, "level": "high"}
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir)
+    raw_post = {"detected_objects": make_result()["detected_objects"],
+                "causal_graph": make_result()["causal_graph"],
+                "recommendations": make_result()["recommendations"], "disaster_level": 8}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    v = out["verdict"]
+    assert v.get("trust_caveat") is False
+    assert "provisional" not in v.get("explanation", "").lower()
+
+
+# ---------------------------------------------------------------------------
+# B6 — a control correlated with the core (control_overlap) is replaced by the placebo
+# ---------------------------------------------------------------------------
+def test_correlated_control_is_replaced_by_placebo(tmp_path):
+    """B6: when the only real-hazard control overlaps the core's downstream targets
+    (control_overlap True — debris from the same collapse), it is causally correlated with
+    the core and would destroy discrimination by construction. run_intervention must prefer
+    the causally-independent placebo and surface the confound (control_overlap)."""
+    gt_dir = write_gt_dir(tmp_path)
+    # Two GT hazards sharing ALL downstream victims -> the non-core hazard is correlated.
+    gt = {
+        "image_filename": "push_34_collapse.jpg",
+        "caption": GT_GRAPH["caption"],
+        "schema_version": "2026-06-10",
+        "nodes": [
+            {"id": "building_1", "label": "structure", "state": "collapsing", "hazardous": True},
+            {"id": "debris_1", "label": "structure", "state": "falling", "hazardous": True},
+            {"id": "rescuer_1", "label": "person", "state": "exposed", "hazardous": False},
+        ],
+        "edges": [
+            {"source": "building_1", "target": "rescuer_1", "effect": "may_harm", "via_state": "collapsing"},
+            {"source": "debris_1", "target": "rescuer_1", "effect": "may_harm", "via_state": "falling"},
+        ],
+    }
+    gt_dir2 = tmp_path / "verified_gt"
+    if not gt_dir2.exists():
+        gt_dir2 = write_gt_dir(tmp_path, gt)
+    else:
+        (gt_dir2 / f"{gt['image_filename']}.gt.json").write_text(json.dumps(gt))
+
+    result = make_result(image_filename="push_34_collapse.jpg")
+    result["detected_objects"] = [
+        {"object_id": "building_1", "label": "structure", "state": "collapsing"},
+        {"object_id": "debris_1", "label": "structure", "state": "falling"},
+        {"object_id": "rescuer_1", "label": "person", "state": "exposed"},
+        {"object_id": "vehicle_1", "label": "car", "state": "parked"},  # non-hazard -> placebo
+    ]
+    result["causal_graph"] = {
+        "nodes": [
+            {"id": "building_1", "label": "structure", "state": "collapsing", "hazardous": True},
+            {"id": "debris_1", "label": "structure", "state": "falling", "hazardous": True},
+            {"id": "rescuer_1", "label": "person", "state": "exposed", "hazardous": False},
+            {"id": "vehicle_1", "label": "car", "state": "parked", "hazardous": False},
+        ],
+        "edges": [
+            {"source": "building_1", "target": "rescuer_1", "effect": "may_harm", "via_state": "collapsing"},
+            {"source": "debris_1", "target": "rescuer_1", "effect": "may_harm", "via_state": "falling"},
+        ],
+        "intervention_candidates": [
+            {"threat": "building_1", "state": "collapsing", "outgoing_edge_count": 1},
+            {"threat": "debris_1", "state": "falling", "outgoing_edge_count": 1},
+        ],
+    }
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir2)
+    enum = intervention.enumerate_candidates(baseline)
+    # Precondition: the chosen real-hazard control overlaps the core (the confound).
+    assert enum["control"] is not None
+    assert enum["control"].get("control_overlap") is True
+    assert enum.get("placebo_control") is not None
+
+    raw_post = {"detected_objects": result["detected_objects"],
+                "causal_graph": result["causal_graph"],
+                "recommendations": [], "disaster_level": 7}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    # B6: the correlated hazard was replaced by the placebo as the primary baseline.
+    assert out["control"]["is_placebo"] is True
+    assert out["discrimination"]["control_kind"] == "placebo"
+    assert out["discrimination"]["control_overlap"] is False

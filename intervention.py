@@ -530,14 +530,17 @@ def enumerate_candidates(baseline: dict) -> dict:
             control = dict(fallback_pick)
             control["control_overlap"] = True
 
-    # ── Placebo (null) control (B6 / C1): when no real-hazard control exists (< 2 GT
-    # hazards, e.g. push_06 with the single water_1 core), suppress a NON-HAZARD detected
-    # object so a discrimination BASELINE always exists. A grounded model should NOT move
-    # for a placebo suppression, so core-moves-more-than-placebo still evidences the
-    # anti-confound claim on a single-hazard scene. Picked deterministically: the first
-    # detected object that is not a graph-A hazard node and not the core, alpha by id.
+    # ── Placebo (null) control (B6 / C1): compute a placebo whenever there is NO clean
+    # real-hazard control — either none exists (< 2 GT hazards, e.g. push_06 with the single
+    # water_1 core) OR the only real-hazard control is CORRELATED with the core
+    # (control_overlap True), in which case the driver prefers the placebo as the primary
+    # anti-confound baseline. Suppress a NON-HAZARD detected object so a discrimination
+    # BASELINE always exists. A grounded model should NOT move for a placebo suppression, so
+    # core-moves-more-than-placebo still evidences the anti-confound claim. Picked
+    # deterministically: the first detected object that is not a graph-A hazard node and not
+    # the core, alpha by id.
     placebo_control: dict[str, Any] | None = None
-    if control is None:
+    if control is None or control.get("control_overlap"):
         hazard_ids = {n.get("id") for n in (graph_a.get("nodes") or []) if n.get("hazardous")}
         core_oid = should_be_core_entry.get("object_id") if should_be_core_entry else None
         non_hazards = [
@@ -632,16 +635,92 @@ _DO_VERB = {
 }
 
 
+#: cap on how many baseline edges are summarized in the do()-prompt anchor block, so a
+#: dense graph does not blow up the prompt. A small cap is enough to anchor U (the entity
+#: list, not the edges, is what pins the scene); the edges are a coupling cue.
+_EMBED_EDGE_CAP: int = 12
+
+
+def _baseline_anchor_block(baseline: dict, suppressed_oid: str) -> str:
+    """Build the EMBED-BASELINE anchor: the model's OWN prior detected_objects + a compact
+    Graph-A edge summary, so the stateless VLM can REUSE its exact ids and hold the
+    non-suppressed scene fixed instead of re-reading the image from scratch (the U-leak
+    cause). Embeds ONLY model-authored content (detected_objects + graph_a); NEVER any
+    gt_graph field (the leak guard depends on this). Degrades gracefully (A4): no objects ->
+    omit the entity list; no edges -> omit the edge summary; the caller keeps the
+    suppression statement + JSON-key spec unconditional so the prompt is always well-formed.
+    """
+    baseline = baseline or {}
+    lines: list[str] = []
+
+    objs = baseline.get("detected_objects") or []
+    obj_lines = []
+    for o in objs:
+        oid = str(o.get("object_id", "")).strip()
+        if not oid:
+            continue
+        label = str(o.get("label", "")).strip()
+        state = str(o.get("state", "")).strip()
+        obj_lines.append(f"  - {oid} (label: {label or '?'}, state: {state or '?'})")
+    if obj_lines:
+        lines.append(
+            "These are the entities YOU already identified in this scene. REUSE these "
+            "exact object_ids verbatim:"
+        )
+        lines.extend(obj_lines)
+    else:
+        lines.append("No other tracked entities were recorded in your prior analysis.")
+
+    edges = ((baseline.get("graph_a") or {}).get("edges")) or []
+    edge_lines = []
+    for e in edges[:_EMBED_EDGE_CAP]:
+        src = str(e.get("source", "")).strip()
+        tgt = str(e.get("target", "")).strip()
+        if not src or not tgt:
+            continue
+        via = str(e.get("via_state", "")).strip()
+        eff = str(e.get("effect", "")).strip() or "affects"
+        via_part = f" [{via}]" if via else ""
+        edge_lines.append(f"  - {src}{via_part} -> {eff} -> {tgt}")
+    if edge_lines:
+        lines.append("Your prior causal edges (source -[state]-> effect -> target):")
+        lines.extend(edge_lines)
+
+    lines.append(
+        f"REUSE these exact object_ids and HOLD every non-suppressed object and its state "
+        f"FIXED — change ONLY what causally depends on the suppressed hazard "
+        f"({suppressed_oid}). Do NOT drop, rename, or re-detect the other entities. The "
+        f"recommendations and causal edges MUST be re-derived and are EXPECTED to change "
+        f"wherever they depended on the suppressed hazard."
+    )
+    return "\n".join(lines)
+
+
 def render_do_prompt(baseline: dict, spec: dict) -> dict:
     """Render the counterfactual do()-prompt that suppresses ONE hazard, holding U fixed.
 
+    EMBED-BASELINE (the U-leak unblocker): the prompt EMBEDS the model's OWN prior analysis
+    — each baseline detected_object as (object_id, label, state) and a compact Graph-A edge
+    summary (source -[state]-> effect -> target) — and instructs the model to REUSE those
+    exact ids and HOLD every non-suppressed object/state fixed. A stateless VLM has no
+    memory of its prior call, so a bare "keep everything fixed" instruction cannot bind
+    without the ids in-prompt; embedding the prior is what lets U HOLD (label-multiset
+    overlap >= U_CUTOFF) and yields a non-void verdict.
+
     Invariants:
-      - output contains the target hazard object_id AND an action verb (the suppression).
-      - contains NO gt_graph content (leak guard: render uses any baseline field EXCEPT
-        gt_graph — never the answer key).
+      - output contains the target hazard object_id AND an action verb (the suppression),
+        plus EVERY baseline detected_object id and a "reuse / hold fixed" instruction.
+      - embeds ONLY the model's own baseline (detected_objects + graph_a edges); contains
+        NO gt_graph content (leak guard: render NEVER touches the answer key).
       - the image reference is unchanged (same scene); the model is told to hold every
-        other entity fixed and re-derive ONLY the four post fields — never to re-describe
-        the whole scene (that would leak U).
+        non-suppressed entity fixed and re-derive ONLY the four post fields — never to
+        re-describe the whole scene (that would leak U).
+      - construct guard (B8): "hold fixed" is scoped to non-suppressed ENTITIES/STATES; the
+        recommendations and causal edges are explicitly EXPECTED to change where they
+        depended on the suppressed hazard, so the embed pins U (the abduction) WITHOUT
+        biasing the action toward echoing the prior (which would mislabel a grounded
+        suppression as a false 'static'/masquerade). The embed pins U, not the do().
+      - degrades gracefully (A4) on empty detected_objects / edgeless graph_a.
     """
     baseline = baseline or {}
     spec = spec or {}
@@ -657,12 +736,13 @@ def render_do_prompt(baseline: dict, spec: dict) -> dict:
         f"positions, same states. Only {oid} has changed."
     )
 
+    anchor = _baseline_anchor_block(baseline, oid)
+
     prompt = (
         f"{suppression_statement}\n\n"
+        f"{anchor}\n\n"
         "Re-analyze the SAME scene under this single change. Do NOT re-describe or "
-        "re-enumerate the whole scene from scratch; keep every other entity and its "
-        "state identical to before, and change only what this one suppression forces "
-        "to change. Return JSON with EXACTLY these keys:\n"
+        "re-enumerate the whole scene from scratch. Return JSON with EXACTLY these keys:\n"
         '  "detected_objects": [{object_id, label, state}],\n'
         '  "causal_graph": {nodes:[{id,label,state,hazardous}], edges:[{source,target,effect,via_state}]},\n'
         '  "recommendations": [{rank, action, structured_reasoning:{threat,state,effect,affected_objects}}],\n'
@@ -1351,11 +1431,41 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
                 new_verdict[k] = core_verdict[k]
         core_verdict = new_verdict
 
+    # ── C3: a non-high baseline trust must QUALIFY the verdict. The groundedness read rests
+    # on the baseline's perception/grounding; when trust is low or moderate the verdict is
+    # provisional and must say so, so a reader cannot mistake it for a high-confidence read.
+    _trust = baseline.get("trust") or {}
+    _trust_level = str(_trust.get("level", "")).strip().lower()
+    if _trust_level in ("low", "moderate"):
+        core_verdict["trust_caveat"] = True
+        try:
+            _ts = float(_trust.get("score", 0.0) or 0.0)
+            _ts_str = f"{_ts:.2f}"
+        except (TypeError, ValueError):
+            _ts_str = str(_trust.get("score", ""))
+        core_verdict["explanation"] = (
+            (core_verdict.get("explanation", "") or "")
+            + f" Caveat: baseline trust is {_trust_level} ({_ts_str}); treat the "
+              "groundedness read as provisional."
+        )
+    else:
+        core_verdict["trust_caveat"] = False
+
     control_block = None
     control_run = None
     control_cand = enum.get("control")
     control_is_placebo = False
-    if control_cand is None and enum.get("placebo_control") is not None:
+    # B6: when the only real-hazard control overlaps the core's downstream targets
+    # (`control_overlap` True — debris from the same collapse, etc.), it is causally
+    # CORRELATED with the core, so suppressing it would move the recs about as much as the
+    # core and DESTROY discrimination by construction (C2). Prefer the causally-independent
+    # placebo as the primary anti-confound baseline; the correlated hazard is recorded as a
+    # secondary diagnostic (control_overlap surfaced in the discrimination block).
+    control_overlap = bool((control_cand or {}).get("control_overlap"))
+    if control_cand is not None and control_overlap and enum.get("placebo_control") is not None:
+        control_cand = enum["placebo_control"]
+        control_is_placebo = True
+    elif control_cand is None and enum.get("placebo_control") is not None:
         # B6 / C1 fallback: no real-hazard control, so suppress a non-hazard (placebo) to
         # still provide a discrimination baseline. role='control', tagged is_placebo.
         control_cand = enum["placebo_control"]
@@ -1373,6 +1483,10 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
                                "moved": None, "consumed": False},
                 "explanation": "U leaked on the control arm; comparison invalid.",
             }
+            # B9: stamp the void onto the persisted control SIGNALS too, so every surface
+            # that exposes the shift numbers carries the invalidity marker (the verdict-level
+            # nulling alone leaves the raw content_shift readable downstream without a flag).
+            control_run["signals"]["comparison_invalid"] = True
         control_block = {
             "spec": control_run["spec"],
             "signals": control_run["signals"],
@@ -1383,6 +1497,10 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
             "post_composition": _post_composition(control_run["post"]),
         }
 
+    # B9: mirror the stamp onto the CORE signals when the core arm leaked.
+    if u_leaked:
+        core["signals"]["comparison_invalid"] = True
+
     discrimination = compare_to_control(
         {"signals": core["signals"]},
         {"signals": control_run["signals"]} if control_run else None,
@@ -1390,6 +1508,20 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
     discrimination["control_kind"] = (
         ("placebo" if control_is_placebo else "hazard") if control_run else None
     )
+    # B6: surface whether the chosen control was a confound (a hazard correlated with the
+    # core). False when a placebo was substituted or a disjoint hazard was found.
+    discrimination["control_overlap"] = (control_overlap and not control_is_placebo)
+    # C4: discrimination is void-aware. If EITHER arm leaked U, no valid comparison exists
+    # on that arm, so the raw shift numbers are noise — refuse a true/false `discriminates`
+    # verdict off a void (a reader must not read "does not discriminate" as masquerade
+    # evidence when no comparison was possible). Keep the raw numbers for audit.
+    control_leaked = bool(control_run and control_run["u_check"].get("leaked"))
+    if u_leaked or control_leaked:
+        reason = ("both_leaked" if (u_leaked and control_leaked)
+                  else ("core_leaked" if u_leaked else "control_leaked"))
+        discrimination["discriminates"] = None
+        discrimination["comparison_invalid"] = True
+        discrimination["comparison_invalid_reason"] = reason
 
     return {
         "baseline": _baseline_summary(baseline),
