@@ -883,3 +883,273 @@ def test_u_leak_voids_verdict(tmp_path):
     }
     assert verdict["cell"] == "u_leaked"
     assert verdict.get("comparison_invalid") is True
+
+
+# ===========================================================================
+# REFINER fixes (live-surfaced findings) — one lock per accepted finding.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# B6 (phantom) — a declared candidate id with no entity anchor is dropped, not targeted
+# ---------------------------------------------------------------------------
+def test_phantom_candidate_is_dropped_and_surfaced(tmp_path):
+    """B6: an intervention_candidate whose `threat` id is in NEITHER graph_a.nodes NOR
+    detected_objects is a PHANTOM (no pixel binding). It must NOT become a candidate /
+    suppression target; it is surfaced under `phantom_candidates` as a baseline
+    inconsistency. Mirrors live push_06 where child_1 was a phantom that drove the do()."""
+    gt_dir = write_gt_dir(tmp_path)
+    result = make_result()
+    # Add a phantom: declared as a candidate, but never detected and not a graph node.
+    result["causal_graph"]["intervention_candidates"].append(
+        {"threat": "child_1", "state": "drowning", "outgoing_edge_count": 9})
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir)
+    enum = intervention.enumerate_candidates(baseline)
+    cand_ids = {c["object_id"] for c in enum["candidates"]}
+    assert "child_1" not in cand_ids, "phantom became a candidate"
+    phantom_ids = {p["object_id"] for p in enum.get("phantom_candidates", [])}
+    assert "child_1" in phantom_ids, "phantom not surfaced for audit"
+    # The real model hazard (flood_1) is still a candidate.
+    assert "flood_1" in cand_ids
+
+
+# ---------------------------------------------------------------------------
+# B8 — target_mitigation excludes the moved target's family from the U denominator
+# ---------------------------------------------------------------------------
+def test_target_mitigation_does_not_self_leak_u():
+    """B8: a target_mitigation do() LEGITIMATELY removes the at-risk entity, so that
+    entity disappearing must NOT count as a U leak. In a sparse 3-object scene, suppressing
+    the only person would otherwise force overlap 2/3 < 0.7 -> spurious u_leaked, making the
+    masquerade/grounded distinction unreachable for person hazards."""
+    base = _det([("person_1", "person"), ("chair_1", "chair"), ("table_1", "table")])
+    base["detected_objects"][0]["state"] = "drowning"
+    post = _det([("chair_1", "chair"), ("table_1", "table")])  # person moved to safety
+    spec = {"intervention_type": "target_mitigation",
+            "target": {"object_id": "person_1", "label": "person"}}
+    u = intervention.check_u_preservation(base, post, spec)
+    assert u["leaked"] is False
+    assert u["object_overlap"] == pytest.approx(1.0)
+    # Control: WITHOUT the spec exception the same removal WOULD read as a leak.
+    u_no_spec = intervention.check_u_preservation(base, post)
+    assert u_no_spec["leaked"] is True
+
+
+# ---------------------------------------------------------------------------
+# B2 — discrimination is computed on content_shift, not the diluted total_shift
+# ---------------------------------------------------------------------------
+def test_compute_shifts_emits_content_shift():
+    """B2: compute_shifts emits `content_shift` = mean(hazard, graph, recommendation),
+    the three content-bearing signals, alongside total_shift = mean(all 5)."""
+    baseline = _full_baseline_for_shifts()
+    post = {"detected_objects": baseline["detected_objects"],
+            "graph_a": {"nodes": [], "edges": [], "intervention_candidates": []},
+            "recommendations": [], "hazard_level": 0}
+    s = intervention.compute_shifts(baseline, post, _spec_obj())
+    assert "content_shift" in s
+    expected = (s["hazard_shift"] + s["graph_shift"] + s["recommendation_shift"]) / 3.0
+    assert s["content_shift"] == pytest.approx(expected)
+
+
+def test_discrimination_uses_content_shift_not_total():
+    """B2: under coherent full re-routing structural/semantic deltas are ~0 and dilute
+    total_shift; discrimination must use content_shift so a real core>control gap is not
+    masked. core re-routes (content 0.9, total 0.54); placebo control static (0.0)."""
+    core_sig = {"hazard_shift": 0.7, "graph_shift": 1.0, "recommendation_shift": 1.0,
+                "structural_shift": 0.0, "semantic_shift": 0.0,
+                "total_shift": 0.54, "content_shift": 0.9}
+    ctrl_sig = {"hazard_shift": 0.0, "graph_shift": 0.0, "recommendation_shift": 0.0,
+                "structural_shift": 0.0, "semantic_shift": 0.0,
+                "total_shift": 0.0, "content_shift": 0.0}
+    d = intervention.compare_to_control({"signals": core_sig}, {"signals": ctrl_sig})
+    assert d["discriminates"] is True
+    assert d["core_content_shift"] == pytest.approx(0.9)
+    assert d["control_content_shift"] == pytest.approx(0.0)
+    # total_shifts still reported for audit.
+    assert d["core_total_shift"] == pytest.approx(0.54)
+
+
+# ---------------------------------------------------------------------------
+# B6 / C1 — placebo (null) control fallback when < 2 GT hazards
+# ---------------------------------------------------------------------------
+def test_placebo_control_when_single_gt_hazard(tmp_path):
+    """B6/C1: GT_GRAPH has ONE hazardous node (water_1), so there is no real-hazard
+    control. enumerate must surface a `placebo_control` (a non-hazard detected object) so a
+    discrimination baseline always exists on the headline single-hazard scene."""
+    baseline = _baseline_with_gt(tmp_path)  # make_result: water hazard + person non-hazard
+    enum = intervention.enumerate_candidates(baseline)
+    assert enum["control"] is None                       # < 2 GT hazards
+    assert enum.get("placebo_control") is not None        # ...but a placebo exists
+    assert enum["placebo_control"]["is_placebo"] is True
+    # The placebo is the non-hazard person, not the water core.
+    assert enum["placebo_control"]["object_id"] == "person_1"
+
+
+def test_run_intervention_uses_placebo_for_discrimination(tmp_path):
+    """B6/C1: with no real-hazard control, run_intervention runs the placebo arm and the
+    discrimination block reports control_kind='placebo' (a baseline always exists)."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    raw_post = {"detected_objects": make_result()["detected_objects"],
+                "causal_graph": make_result()["causal_graph"],
+                "recommendations": make_result()["recommendations"], "disaster_level": 8}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    assert out["control"] is not None
+    assert out["control"]["is_placebo"] is True
+    assert out["discrimination"]["control_kind"] == "placebo"
+    assert out["discrimination"]["discriminates"] is not None  # baseline existed
+
+
+# ---------------------------------------------------------------------------
+# A4 / B3 / C4 / R4 — gt_core_unobserved OUTRANKS u_leaked (perception miss survives void)
+# ---------------------------------------------------------------------------
+def test_gt_core_unobserved_survives_u_leak(tmp_path):
+    """A4/B3/C4/R4: when GT names a core the model never perceived AND U leaks, the verdict
+    must stay `gt_core_unobserved` (a perception miss is a baseline fact, U-independent) with
+    a `u_leaked` annotation — NOT overwritten to a bare u_leaked cell that buries the
+    headline finding. This is the exact live push_06 failure."""
+    gt_dir = write_gt_dir(tmp_path)  # GT core = water_1, unobserved by the push06-like model
+    baseline = intervention.intervention_baseline(
+        _push06_like_result(), image_data_url="data:img", gt_dir=gt_dir)
+    # A post that diverges -> U leaks.
+    leaked_post = {
+        "detected_objects": [{"object_id": "x_1", "label": "tree", "state": "a"},
+                             {"object_id": "y_1", "label": "rock", "state": "b"}],
+        "causal_graph": {"nodes": [], "edges": []}, "recommendations": [],
+        "disaster_level": 0,
+    }
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(leaked_post))
+    v = out["verdict"]
+    assert out["u_check"]["leaked"] is True
+    assert v["cell"] == "gt_core_unobserved"      # perception miss NOT buried under the void
+    assert v.get("u_leaked") is True               # ...but the leak is annotated
+    assert v["gt_core_unobserved"]["object_id"] == "water_1"
+    assert v["is_should_be_core"] is None          # B3 tri-state, not hard False
+    assert v["move_basis"].get("moved") is None     # B9: no movement asserted under void
+
+
+# ---------------------------------------------------------------------------
+# B3 — is_should_be_core is tri-state (None when GT absent, not hard False)
+# ---------------------------------------------------------------------------
+def test_is_should_be_core_is_none_when_no_gt():
+    """B3: adjudicate must report is_should_be_core as None (unknown) when GT is absent,
+    never coerce it to a hard False that misreads as a definite 'not-core' row."""
+    cands = _candidates(should_be_core=False)  # should_be_core None -> no GT
+    spec_unknown = {"target": {"object_id": "h_1", "state": "engulfing", "label": "water",
+                               "hazard_class": "engulfing_fluid"},
+                    "intervention_type": "edge_severance", "modality": "language",
+                    "is_should_be_core": False, "role": "core"}
+    v = intervention.adjudicate_groundedness(spec_unknown, MOVED_SIGNALS, cands)
+    assert v["cell"] == "not_adjudicable"
+    assert v["is_should_be_core"] is None
+
+
+# ---------------------------------------------------------------------------
+# B9 — U-leak void nulls move_basis.moved (no field asserts movement above a void)
+# ---------------------------------------------------------------------------
+def test_u_leak_void_nulls_move_basis_moved(tmp_path):
+    """B9: on a void, NEITHER verdict.moved NOR move_basis.moved may assert movement.
+    A latent move_basis.moved=true under a voided verdict is an overclaim if downstream
+    code reads move_basis.moved instead of verdict.moved."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    leaked_post = {
+        "detected_objects": [{"object_id": "t_1", "label": "tree", "state": "x"},
+                             {"object_id": "r_1", "label": "rock", "state": "y"}],
+        "causal_graph": {"nodes": [], "edges": []},
+        "recommendations": [{"rank": 1, "action": "Z", "threat": "t_1", "state": "x",
+                             "related_object_ids": ["t_1"], "affected_objects": ["t_1"]}],
+        "disaster_level": 0,
+    }
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(leaked_post))
+    v = out["verdict"]
+    assert v["cell"] == "u_leaked"
+    assert v["moved"] is None
+    assert v["move_basis"].get("moved") is None        # the latent overclaim is gone
+    assert v["move_basis"].get("consumed") is False
+
+
+# ---------------------------------------------------------------------------
+# C1 — post composition is persisted for U-leak auditability
+# ---------------------------------------------------------------------------
+def test_run_output_includes_post_composition(tmp_path):
+    """C1: the run record must carry the post's detected_objects + canonical label
+    multiset, so a confound auditor can verify a U-leak is a genuine scene re-read vs a
+    benign relabel. The live artifact dropped this, making the void unfalsifiable."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    raw_post = {"detected_objects": [{"object_id": "a_1", "label": "water", "state": "s"}],
+                "causal_graph": {"nodes": [], "edges": []}, "recommendations": [],
+                "disaster_level": 3}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    pc = out.get("post_composition")
+    assert pc is not None
+    assert pc["detected_objects"] == raw_post["detected_objects"]
+    assert pc["label_multiset"] == {"water": 1}
+
+
+# ---------------------------------------------------------------------------
+# role / provenance — spec.core_basis records GT vs declared core independently
+# ---------------------------------------------------------------------------
+def test_spec_core_basis_gt_when_gt_confirmed(tmp_path):
+    """role: the core arm on a GT-confirmed should-be-core carries spec.core_basis='gt'."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    raw_post = {"detected_objects": make_result()["detected_objects"],
+                "causal_graph": make_result()["causal_graph"],
+                "recommendations": make_result()["recommendations"], "disaster_level": 8}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    assert out["spec"]["core_basis"] == "gt"
+
+
+def test_spec_core_basis_declared_when_no_gt(tmp_path):
+    """role: with no GT, the declared-core fallback arm carries spec.core_basis='declared_a'
+    so the arm's provenance survives even when the U-leak override rewrites the verdict-level
+    core_not_declared annotation."""
+    gt_dir = write_gt_dir(tmp_path)
+    result = make_result(image_filename="no_gt_here.jpg")
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir)
+    raw_post = {"detected_objects": result["detected_objects"],
+                "causal_graph": result["causal_graph"],
+                "recommendations": result["recommendations"], "disaster_level": 8}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    assert out["spec"]["core_basis"] == "declared_a"
+
+
+# ---------------------------------------------------------------------------
+# A7 — declared-core diagnostics survive a U-leak void (carried forward, not erased)
+# ---------------------------------------------------------------------------
+def test_core_not_declared_survives_u_leak(tmp_path):
+    """A4/A7: when there is no GT (declared-core fallback) AND U leaks, the void must
+    CARRY FORWARD core_not_declared + declared_core_source rather than erase them, so the
+    declared-core provenance is not lost under the void."""
+    gt_dir = write_gt_dir(tmp_path)
+    result = make_result(image_filename="no_gt_here.jpg")  # no GT
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir)
+    leaked_post = {
+        "detected_objects": [{"object_id": "t_1", "label": "tree", "state": "x"},
+                             {"object_id": "r_1", "label": "rock", "state": "y"}],
+        "causal_graph": {"nodes": [], "edges": []}, "recommendations": [],
+        "disaster_level": 0,
+    }
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(leaked_post))
+    v = out["verdict"]
+    assert out["u_check"]["leaked"] is True
+    assert v["cell"] == "u_leaked"
+    assert v.get("core_not_declared") is True            # carried forward under the void
+    assert v.get("declared_core_source") == "A"
+
+
+# ---------------------------------------------------------------------------
+# A4 (driver) — an unrecognized `candidates` selection key is flagged, not silently used
+# ---------------------------------------------------------------------------
+def test_unused_candidates_selection_key_is_flagged(tmp_path):
+    """A4: the driver passed selections={'candidates': ...}, a key the contract does not
+    define; enumerate is always re-run. run_intervention must record that the bundle was
+    ignored (selection_notes.candidates_arg_ignored) rather than silently accept it."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    raw_post = {"detected_objects": make_result()["detected_objects"],
+                "causal_graph": make_result()["causal_graph"],
+                "recommendations": make_result()["recommendations"], "disaster_level": 8}
+    selections = {"modality": "language", "candidates": [{"object_id": "ignored"}]}
+    out = intervention.run_intervention(baseline, selections, make_vlm_stub(raw_post))
+    assert out["selection_notes"]["candidates_arg_ignored"] is True

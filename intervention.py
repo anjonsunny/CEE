@@ -1,24 +1,32 @@
-"""CEE+ Intervention pipeline (Layer 2, Stage 1) — the counterfactual probe.
+"""CEE+ Intervention pipeline (Layer 2, Stage 1) — the counterfactual core.
 
-This module runs the counterfactual that adjudicates the *operative core*: does the
-model actually use the hazard it names? We suppress one hazard (the do()), hold the
-rest of the scene fixed (U preserved), and measure whether the recommendation moves
-more than chance. A move only for hazards that should matter = grounded; the
-recommendation staying put when the real hazard is removed = rung-1 masquerade.
+CEE+ measures whether a vision-language model's disaster-safety recommendations are
+*grounded* (rung-3: the advice derives from the hazard) or a *rung-1 masquerade*
+(fluent advice pattern-matched to the scene, not reasoned from the hazard). The probe
+is a counterfactual: suppress one hazard, hold the rest of the scene fixed (U), and see
+whether the recommendation moves more than chance. Moves only for hazards that should
+matter = grounded; stays put when the real hazard is removed = masquerade.
 
-Design contract (see INTERVENTION_WORKFLOW.md):
+This module runs that counterfactual end to end and places each result in a 2x2
+groundedness matrix:
+
+    should-be-core (GT) x moved-on-suppression ->
+        {grounded, masquerade, spurious_grounding, correctly_ignored}
+    no GT -> not_adjudicable.
+
+Design contract (frozen, see INTERVENTION_WORKFLOW.md):
   - Every function returns plain JSON-serializable dicts. NO Dash/UI imports here.
   - The ONLY VLM access is `vlm_fn`, an injected callable (real in production, a stub
     in tests). No hard-coded model.
-  - `intervention.py` must import cleanly without `import main` at module load
-    (main.py imports this module for the UI, so a top-level `import main` is circular).
-    Any `main` helper is reached via a LAZY import inside the function that uses it.
+  - `intervention.py` must import cleanly WITHOUT `import main` at module load (main.py
+    imports this module for the UI, so a top-level `import main` is circular). Any
+    `main` helper is reached via a LAZY import inside the function that uses it.
   - `run_counterfactual` parses raw VLM JSON for four fields directly; it NEVER calls
     `normalize_result` (a counterfactual world has no original-scene answer key, so
     re-deriving gt_validation/trust would be incoherent).
 
 Pearl framing: conditioning on one scene = abduction (fixes U); suppression = the
-do(); the measured shift = unit-specific prediction. Graph A and Graph B are both
+do(); the measured shift = unit-specific prediction. Graph A and Graph B are BOTH
 rung-1 declarations; the ONLY mechanistic artifact is the operative core, revealed
 solely by the do().
 """
@@ -26,255 +34,190 @@ solely by the do().
 from __future__ import annotations
 
 import json
-import re
-from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 # ────────────────────────────────────────────────────────────
-# Module constants (named; no magic numbers — rubric A3)
+# Module constants (#3 move rule, #6 U-preservation, GT location).
+# These are PARAMETERS: the reflect pass may tune MOVE_CUTOFF or the aggregation
+# (mean vs max vs weighted) against the oracle without touching call sites.
 # ────────────────────────────────────────────────────────────
 
-#: Canonical-label/class multiset overlap below this -> the do() leaked U (the scene
-#: genuinely diverged instead of being held fixed) and the counterfactual comparison is
-#: void. R1: gated on label MULTISETS, not exact object_ids (ids are not stable across
-#: stateless VLM calls, so id churn would falsely void every live run).
-U_CUTOFF: float = 0.7
-
-#: `total_shift = mean(all 5 deltas)`. The move rule is NOT the bare mean >= cutoff:
-#: the mean washes out a single strong signal (B2). A grounded model may respond ONLY
-#: by fully rewriting its recommendations (rec_shift 1.0, others ~0 -> mean 0.2), which
-#: the bare mean would mislabel masquerade. So `moved = total_shift >= MOVE_CUTOFF OR
-#: recommendation_shift >= REC_MOVE_CUTOFF`: the recommendation is the action-coupled
-#: signal that operationalizes "the advice moved", so a strong rec shift alone counts as
-#: moved even when the two near-duplicate graph signals dilute the mean. Both cutoffs
-#: stay tunable parameters the reflect pass may revisit against the oracle.
+#: total_shift >= MOVE_CUTOFF -> the output "moved" (rule #3). Fixed cutoff, not
+#: noise-calibrated for Stage 1: a live "moved" is therefore provisional (a small change
+#: could be sampling noise). Acceptable for the qualitative walkthrough.
 MOVE_CUTOFF: float = 0.3
 
-#: A recommendation_shift at/above this counts as "moved" on its own (B2): the recs are
-#: the action-coupled signal, so a full rec rewrite is the canonical groundedness move
-#: even if the mean of all five is diluted below MOVE_CUTOFF.
+#: object-id Jaccard below this -> U leaked (rule #6). 0.7 leaves margin for the single
+#: suppressed entity dropping out while still catching a wholesale scene re-read. The gate
+#: runs on the canonical LABEL multiset (id-rename tolerant); the exact-id Jaccard is kept
+#: as a non-gating secondary diagnostic (raw_id_overlap).
+U_CUTOFF: float = 0.7
+
+#: B2 single-strong-signal guard: a recommendation_shift this high alone clears "moved"
+#: even when the mean (total_shift) is below MOVE_CUTOFF. The recommendation IS the action
+#: whose movement is the operative-core signal, so a full rec rewrite must count even if the
+#: other four (graph/hazard/structural/semantic) churn little. Kept separate from MOVE_CUTOFF
+#: so the OR-escape is tunable without touching the mean gate.
 REC_MOVE_CUTOFF: float = 0.5
 
-#: hazard_level scale (disaster_level is 0-10), used to normalise hazard_shift.
-HAZARD_LEVEL_MAX: int = 10
+#: GT answer-key directory + filename pattern, mirroring main.GT_VERIFIED_DIR. Resolved
+#: as a default here so this module needs no top-level `import main`; callers may pass a
+#: tmp `gt_dir` (tests) instead.
+GROUND_TRUTH_ROOT = Path(__file__).resolve().parent / "exports" / "ground_truth"
+GT_VERIFIED_DIR = GROUND_TRUTH_ROOT / "verified"
 
-#: Default location of verified ground-truth answer-key graphs. Resolved lazily so
-#: the module never depends on main at import time; falls back to the repo layout.
-GT_VERIFIED_DIR: Path = (
-    Path(__file__).resolve().parent / "exports" / "ground_truth" / "verified"
-)
 
 # ────────────────────────────────────────────────────────────
-# hazard_class buckets (Fixed rule #1) + type map (Fixed rule #2)
+# Fixed rule #1 — hazard_class buckets (Builder and Test-author honor identically).
 # ────────────────────────────────────────────────────────────
 
-#: engulfing_fluid — diffuse media that engulf; suppression severs propagation edges.
+#: engulfing_fluid: water, smoke, gas, mud, dust, chemical (diffuse media).
 _ENGULFING_FLUID_LABELS = {
-    "water", "floodwater", "flood_water", "flood", "river", "stream", "creek",
-    "lake", "pond", "ocean", "sea", "current", "tide", "surge", "wave",
-    "smoke", "smog", "fume", "fumes", "haze", "gas", "vapor", "vapour",
-    "mud", "mudslide", "sludge", "slurry", "dust", "ash", "chemical", "spill",
-    "oil", "fuel_spill", "lava",
+    "water", "river", "stream", "creek", "lake", "pond", "ocean", "sea", "flood",
+    "floodwater", "flood_water", "current", "tide", "surge",
+    "smoke", "smog", "fume", "fumes", "haze",
+    "gas", "vapor", "vapour", "steam",
+    "mud", "mudslide", "sludge", "slurry",
+    "dust", "ash", "debris_cloud",
+    "chemical", "chemicals", "spill", "oil", "fuel",
 }
-#: discrete_source — point sources removable at the source.
+
+#: discrete_source: fire, downed_line, tanker, structure (a nameable thing to remove).
 _DISCRETE_SOURCE_LABELS = {
     "fire", "flame", "flames", "blaze", "wildfire", "inferno",
-    "downed_line", "power_line", "powerline", "wire", "wiring", "cable",
-    "tanker", "truck", "tank", "canister", "cylinder", "drum", "barrel",
-    "structure", "building", "house", "home", "wall", "canopy", "roof",
-    "tree", "pole", "tower", "bridge", "vehicle", "car",
-}
-#: person_in_hazard — a person/animal in an at-risk state; target gets mitigated.
-_PERSON_LABELS = {
-    "person", "people", "man", "woman", "boy", "girl", "child", "kid",
-    "human", "worker", "responder", "firefighter", "driver", "pedestrian",
-    "victim", "resident", "occupant", "animal", "dog", "cat", "livestock",
-}
-#: states that mark a person/animal as a victim (TARGET of harm).
-_AT_RISK_STATES = {
-    "injured", "bleeding", "fleeing", "trapped", "cowering", "drowning",
-    "suffocating", "unconscious", "stranded", "wedged", "clinging", "wading",
-    "submerged", "stuck",
+    "wire", "wiring", "downed_line", "power_line", "powerline", "cable",
+    "tanker", "tank", "canister", "cylinder", "barrel", "drum",
+    "structure", "house", "home", "building", "wall", "roof", "canopy",
+    "bridge", "tower", "pole", "pump", "vehicle", "car", "truck", "tree",
 }
 
-HAZARD_CLASS_TYPE_MAP: dict[str, str] = {
+#: at-risk / Distress states that make a person/animal node a person_in_hazard candidate.
+_PERSON_AT_RISK_STATES = {
+    "injured", "bleeding", "fleeing", "trapped", "cowering",
+    "drowning", "suffocating", "unconscious",
+}
+
+_PERSON_LABELS = {
+    "person", "people", "human", "man", "woman", "boy", "girl", "child", "kid",
+    "toddler", "infant", "adult", "elderly", "senior", "male", "female",
+    "cyclist", "biker", "driver", "pedestrian", "passerby", "hiker", "civilian",
+    "bystander", "occupant", "resident", "victim", "survivor", "worker", "homeowner",
+    "firefighter", "fireman", "police", "policeman", "officer", "cop", "paramedic",
+    "emt", "rescuer", "first_responder", "responder", "soldier", "teacher", "student",
+    "animal", "dog", "puppy", "cat", "kitten", "snake", "tiger", "lion", "bear",
+    "bird", "horse", "cow", "sheep", "pig", "goat", "deer", "rabbit", "fox", "wolf",
+    "livestock",
+}
+
+#: Fixed rule #2 — type map. An explicit intervention_type argument overrides.
+_TYPE_MAP = {
     "engulfing_fluid": "edge_severance",
     "discrete_source": "source_removal",
     "person_in_hazard": "target_mitigation",
 }
 
-# ────────────────────────────────────────────────────────────
-# Small internal helpers (pure, deterministic)
-# ────────────────────────────────────────────────────────────
+
+def _base_label(value: str) -> str:
+    """The bare label of a node/object_id ('water_1' -> 'water'), lowercased."""
+    s = str(value or "").strip().lower()
+    if not s:
+        return ""
+    parts = s.rsplit("_", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return s
+
+
+#: Local label-family extras layered on top of main.LABEL_HIERARCHY for the U gate and
+#: GT<->model co-reference. main's map does not collapse furniture synonyms; we add the
+#: ones the canonical-multiset comparison needs (e.g. seat<->chair).
+_LABEL_FAMILY_EXTRAS = {
+    "seat": "chair", "stool": "chair", "bench": "chair", "chair": "chair",
+}
 
 
 def _canonical_label(label: str) -> str:
-    """Best-effort family for a raw label via main.LABEL_HIERARCHY (lazy import).
+    """Canonical label family for a label ('man' -> 'person', 'seat' -> 'chair').
 
-    Lazy so this module imports without `import main` (Fixed rule #8). Falls back to
-    the raw, lower-cased token when main or the entry is unavailable.
+    Reuses main.LABEL_HIERARCHY (lazy import, rule #8) so the U gate and GT co-reference
+    share the same label-family definition as the rest of the pipeline, plus a few local
+    furniture extras. Anything unmapped canonicalises to its own bare label.
     """
-    token = (label or "").strip().lower()
-    if not token:
+    base = _base_label(label)
+    if not base:
         return ""
     try:
-        import main  # lazy: avoids the circular import at module load
-        return main.LABEL_HIERARCHY.get(token, token)
-    except Exception:
-        return token
+        from main import LABEL_HIERARCHY  # type: ignore
+    except Exception:  # pragma: no cover - main always present in app context
+        LABEL_HIERARCHY = {}
+    if base in _LABEL_FAMILY_EXTRAS:
+        return _LABEL_FAMILY_EXTRAS[base]
+    return LABEL_HIERARCHY.get(base, base)
 
 
-def _strip_object_id_suffix(object_id: str) -> str:
-    """`house_1` -> `house`; the bare label family used for class bucketing."""
-    token = (object_id or "").strip().lower()
-    return re.sub(r"_\d+$", "", token)
+def canonicalize_state(state: str) -> str:
+    """Canonical state form (handles synonyms), reusing main.canonicalize_state when
+    available (lazy import, rule #8); falls back to a lowercased strip otherwise."""
+    s = str(state or "").strip().lower()
+    if not s:
+        return ""
+    try:
+        from main import canonicalize_state as _cs  # type: ignore
+        return _cs(s)
+    except Exception:  # pragma: no cover - main always present in app context
+        return s
 
 
-def classify_hazard_class(label: str, object_id: str, state: str) -> str:
-    """Bucket a hazard into one of the three Fixed-rule-#1 classes.
-
-    Order matters: a person/animal in an at-risk state is `person_in_hazard` even if
-    the bare label would otherwise match nothing; engulfing fluids are checked before
-    discrete sources because some tokens (e.g. a fuel "spill") read as fluid.
-    """
-    raw = (label or "").strip().lower() or _strip_object_id_suffix(object_id)
-    fam = _canonical_label(raw) or raw
-    st = (state or "").strip().lower()
-
-    if (raw in _PERSON_LABELS or fam in {"person", "responder", "animal"}) and (
-        st in _AT_RISK_STATES
-    ):
-        return "person_in_hazard"
-    if raw in _ENGULFING_FLUID_LABELS or fam in {"water", "smoke"}:
-        return "engulfing_fluid"
-    if raw in _DISCRETE_SOURCE_LABELS or fam in {
-        "fire", "structure", "vehicle", "vegetation", "infrastructure",
-    }:
-        return "discrete_source"
-    # default: a named hazard with an acute/spreading state behaves like a source.
-    return "discrete_source"
-
-
-def _nodes_by_id(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    out: dict[str, dict[str, Any]] = {}
-    for n in graph.get("nodes") or []:
-        nid = str(n.get("id", "")).strip()
-        if nid:
-            out[nid] = n
+def _downstream_targets(graph: dict[str, Any]) -> dict[str, set]:
+    """Map each source node id -> the set of its downstream target ids (from raw edges).
+    Used by the control picker to test target-disjointness (causal independence)."""
+    out: dict[str, set] = {}
+    for e in graph.get("edges") or []:
+        src = str(e.get("source", "")).strip()
+        tgt = str(e.get("target", "")).strip()
+        if not src:
+            continue
+        out.setdefault(src, set())
+        if tgt:
+            out[src].add(tgt)
     return out
 
 
-def _outgoing_edge_count_from_edges(graph: dict[str, Any], node_id: str, state: str) -> int:
-    """Edge-count ADAPTER for graphs that lack `intervention_candidates` (B and GT).
+def classify_hazard_class(label: str, state: str) -> str:
+    """Map a (label, state) to one of the three hazard buckets (fixed rule #1).
 
-    Counts edges whose `source` == node_id (and `via_state` == state when present),
-    mirroring how Graph A's own intervention_candidates are built in main.
+    Invariant: deterministic. A person/animal in an at-risk Distress state ->
+    person_in_hazard regardless of label family; otherwise label-family lookup,
+    engulfing_fluid before discrete_source; an unrecognised entity defaults to
+    discrete_source (a removable named source is the conservative do()).
     """
-    count = 0
-    for e in graph.get("edges") or []:
-        if str(e.get("source", "")).strip() != node_id:
-            continue
-        via = str(e.get("via_state", "")).strip()
-        if state and via and via != state:
-            continue
-        count += 1
-    return count
+    base = _base_label(label)
+    st = str(state or "").strip().lower()
+    if base in _PERSON_LABELS and st in _PERSON_AT_RISK_STATES:
+        return "person_in_hazard"
+    if base in _ENGULFING_FLUID_LABELS:
+        return "engulfing_fluid"
+    if base in _DISCRETE_SOURCE_LABELS:
+        return "discrete_source"
+    return "discrete_source"
 
 
-def _hazard_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
-    """Hazard-bearing nodes of a graph (`hazardous` true), in stable id order."""
-    out = [
-        n for n in (graph.get("nodes") or [])
-        if n.get("hazardous") and str(n.get("id", "")).strip()
-    ]
-    return sorted(out, key=lambda n: str(n.get("id", "")))
+# ────────────────────────────────────────────────────────────
+# Step 0 — intervention_baseline
+# ────────────────────────────────────────────────────────────
 
+def _load_gt_graph(image_filename: str, gt_dir: Path | None) -> dict[str, Any] | None:
+    """Load the verified GT answer-key graph by image_filename, or None.
 
-def _acuteness_score(state: str) -> int:
-    """Mirror main.pick_suppression_framework's acuteness tiers (lazy import)."""
-    s = (state or "").strip().lower()
-    try:
-        import main
-        if s in main.ACUTE_STATES:
-            return 2
-        if s in main.STABLE_HAZARD_STATES:
-            return 1
-    except Exception:
-        pass
-    return 0
-
-
-# ════════════════════════════════════════════════════════════
-# Step 0 — baseline assembly (loads GT by filename; not a passthrough)
-# ════════════════════════════════════════════════════════════
-
-
-def intervention_baseline(
-    result: dict,
-    image_data_url: Optional[str],
-    gt_dir: Optional[Path] = None,
-) -> dict:
-    """Assemble the baseline the rest of the pipeline reads.
-
-    Invariant: LOADS `gt_graph` from verified GT by `image_filename` (Fixed rule #4),
-    NOT a passthrough from `result` (which only carries the `gt_validation`
-    comparison). Carries the passed-in `image_data_url` verbatim. Maps `hazard_level`
-    from the result's `disaster_level` (Fixed rule #5), clamped to 0-10. Returns a
-    plain JSON-serializable dict; `gt_graph` is None when no verified GT exists.
-    """
-    result = result or {}
-    image_filename = str(result.get("image_filename", "") or "")
-
-    gt_graph = _load_gt_graph(image_filename, gt_dir)
-
-    try:
-        hazard_level = int(result.get("disaster_level", 0) or 0)
-    except (TypeError, ValueError):
-        hazard_level = 0
-    hazard_level = max(0, min(hazard_level, HAZARD_LEVEL_MAX))
-
-    graph_a = result.get("causal_graph") or {}   # Graph A = causal_graph (Fixed rule #10)
-    graph_b = result.get("graph_b") or {}
-
-    trust_src = result.get("pre_intervention_trust") or result.get("trust") or {}
-    trust = {
-        "score": trust_src.get("score", 0.0),
-        "level": trust_src.get("level", "unknown"),
-    }
-
-    return {
-        "run_id": result.get("run_id", ""),
-        "image_filename": image_filename,
-        "image_data_url": image_data_url,
-        "prompt": result.get("prompt", ""),
-        "caption": result.get("caption", "") or result.get("image_caption", ""),
-        "detected_objects": [
-            {
-                "object_id": o.get("object_id", ""),
-                "label": o.get("label", ""),
-                "state": o.get("state", ""),
-            }
-            for o in (result.get("detected_objects") or [])
-        ],
-        "threats": result.get("threats") or [],
-        "recommendations": result.get("recommendations") or [],
-        "graph_a": graph_a,
-        "graph_b": graph_b,
-        "gt_graph": gt_graph,
-        "trust": trust,
-        "hazard_level": hazard_level,
-    }
-
-
-def _load_gt_graph(image_filename: str, gt_dir: Optional[Path]) -> Optional[dict]:
-    """Read `<image_filename>.gt.json` from `gt_dir` (default GT_VERIFIED_DIR) and
-    return {nodes, edges, caption} or None. Never raises on a missing/bad file.
+    Fixed rule #4: gt_graph is LOADED from the answer key (`<image_filename>.gt.json`),
+    NOT a passthrough from `result` (which only carries the gt_validation comparison).
+    Returns {nodes, edges, caption} or None when no verified GT exists / it is unreadable.
     """
     if not image_filename:
         return None
-    base = Path(gt_dir) if gt_dir is not None else GT_VERIFIED_DIR
-    gt_path = base / f"{image_filename}.gt.json"
+    base = gt_dir if gt_dir is not None else GT_VERIFIED_DIR
+    gt_path = Path(base) / f"{image_filename}.gt.json"
     if not gt_path.exists():
         return None
     try:
@@ -288,363 +231,380 @@ def _load_gt_graph(image_filename: str, gt_dir: Optional[Path]) -> Optional[dict
     }
 
 
-# ════════════════════════════════════════════════════════════
-# Step 1 — enumerate candidates (A / B / GT cores + control)
-# ════════════════════════════════════════════════════════════
+def intervention_baseline(result: dict, image_data_url: str | None,
+                          gt_dir: Path | None = None) -> dict:
+    """Assemble the baseline the rest of the pipeline reads.
+
+    Invariant: LOADS `gt_graph` from verified GT by `image_filename` (rule #4 — not a
+    passthrough); carries the passed-in `image_data_url` verbatim; maps `hazard_level`
+    from the result's `disaster_level` (rule #5, clamped 0-10). Graph A = the result's
+    `causal_graph`. Never raises on a sparse/empty result.
+    """
+    result = result or {}
+    image_filename = str(result.get("image_filename", "") or "")
+
+    try:
+        hazard_level = int(result.get("disaster_level", 0) or 0)
+    except (TypeError, ValueError):
+        hazard_level = 0
+    hazard_level = max(0, min(hazard_level, 10))
+
+    graph_a = result.get("causal_graph") or {"nodes": [], "edges": [], "intervention_candidates": []}
+    graph_b = result.get("graph_b") or {"nodes": [], "edges": [], "suppression_pick": {}}
+    gt_graph = _load_gt_graph(image_filename, gt_dir)
+
+    trust_src = result.get("pre_intervention_trust") or {}
+    trust = {
+        "score": trust_src.get("score", 0.0),
+        "level": trust_src.get("level", "unknown"),
+    }
+
+    return {
+        "run_id": str(result.get("run_id", "") or ""),
+        "image_filename": image_filename,
+        "image_data_url": image_data_url,
+        "prompt": str(result.get("prompt", "") or ""),
+        "caption": str(result.get("caption", "") or ""),
+        "detected_objects": result.get("detected_objects") or [],
+        "threats": result.get("threats") or [],
+        "recommendations": result.get("recommendations") or [],
+        "graph_a": graph_a,
+        "graph_b": graph_b,
+        "gt_graph": gt_graph,
+        "trust": trust,
+        "hazard_level": hazard_level,
+    }
+
+
+# ────────────────────────────────────────────────────────────
+# Step 1 — enumerate_candidates (with the edge-count ADAPTER for B and GT)
+# ────────────────────────────────────────────────────────────
+
+def _hazard_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    """Hazardous nodes of a graph (state-based: hazardous=true)."""
+    return [n for n in (graph.get("nodes") or []) if n.get("hazardous")]
+
+
+def _outgoing_edge_count_adapter(graph: dict[str, Any]) -> dict[tuple[str, str], int]:
+    """ADAPTER: derive outgoing_edge_count per (source, via_state) from raw edges.
+
+    Graph A already ships `intervention_candidates` with this count; Graph B and GT do
+    NOT, so we recompute it here, letting the SAME ranking rule
+    (main.pick_suppression_framework: outgoing_edge_count -> acuteness -> alpha) apply to
+    all three graphs. Deterministic (pure dict aggregation).
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for e in graph.get("edges") or []:
+        src = str(e.get("source", "")).strip()
+        via = str(e.get("via_state", "")).strip()
+        if not src:
+            continue
+        counts[(src, via)] = counts.get((src, via), 0) + 1
+    return counts
+
+
+def _candidates_from_graph(graph: dict[str, Any],
+                           use_intervention_candidates: bool,
+                           extra_observed_ids: set[str] | None = None,
+                           ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rank one graph's hazard candidates: ([{object_id,state,label,
+    outgoing_edge_count,rank}] in ranked order, [phantom candidates]).
+
+    Ranking mirrors main.pick_suppression_framework EXACTLY (outgoing_edge_count desc,
+    acuteness desc, then alpha by (object_id, state)) so A/B/GT rank on ONE rule. For A
+    we read the model-supplied `intervention_candidates`; for B/GT we use the edge-count
+    adapter. Determinism: a stable multi-key sort, no set-iteration order dependence.
+
+    B6 phantom guard: a model-declared intervention_candidate whose `threat` id has NO
+    binding in this graph's nodes (nor in `extra_observed_ids`, e.g. detected_objects) is a
+    PHANTOM — an id with no pixel/entity anchor. It is DROPPED from the ranked candidates
+    (so it can never become a suppression target / control) and returned separately as a
+    baseline-internal inconsistency for surfacing. The adapter path (B/GT) ranks only real
+    hazard nodes, so it produces no phantoms by construction.
+    """
+    # Lazy import (rule #8): acuteness sets live in main; a top-level import is circular.
+    try:
+        from main import ACUTE_STATES, STABLE_HAZARD_STATES  # type: ignore
+    except Exception:  # pragma: no cover - main always present in app context
+        ACUTE_STATES = {
+            "burning", "collapsing", "charging", "rising", "spreading", "escalating",
+            "striking", "leaking", "billowing", "seeping", "aiming", "approaching",
+        }
+        STABLE_HAZARD_STATES = {
+            "collapsed", "fallen", "crushed", "flooded", "coiled", "rabid", "armed",
+        }
+
+    def acuteness(state: str) -> int:
+        s = (state or "").strip().lower()
+        if s in ACUTE_STATES:
+            return 2
+        if s in STABLE_HAZARD_STATES:
+            return 1
+        return 0
+
+    node_state = {str(n.get("id", "")).strip(): str(n.get("state", "")) for n in (graph.get("nodes") or [])}
+    node_label = {str(n.get("id", "")).strip(): str(n.get("label", "")) for n in (graph.get("nodes") or [])}
+    node_ids = set(node_state)
+    observed = node_ids | (extra_observed_ids or set())
+
+    raw: list[tuple[str, str, int]] = []  # (object_id, state, outgoing_edge_count)
+    phantoms: list[dict[str, Any]] = []   # B6: declared candidate ids with no entity anchor
+    if use_intervention_candidates and (graph.get("intervention_candidates") is not None):
+        for c in graph.get("intervention_candidates") or []:
+            tid = str(c.get("threat", "")).strip()
+            st = str(c.get("state", "")).strip()
+            if not tid:
+                continue
+            if tid not in observed:
+                # B6: phantom target — declared as a candidate but never detected as a node
+                # or object. Drop it (never let it drive the do()), surface it for audit.
+                phantoms.append({"object_id": tid, "state": st,
+                                 "label": _base_label(tid), "reason": "not_in_detected_or_nodes"})
+                continue
+            raw.append((tid, st, int(c.get("outgoing_edge_count", 0) or 0)))
+    else:
+        adapter = _outgoing_edge_count_adapter(graph)
+        for n in _hazard_nodes(graph):
+            tid = str(n.get("id", "")).strip()
+            st = str(n.get("state", "")).strip()
+            if tid:
+                raw.append((tid, st, adapter.get((tid, st), 0)))
+
+    ranked = sorted(raw, key=lambda t: (-(t[2]), -acuteness(t[1]), t[0], t[1]))
+    out: list[dict[str, Any]] = []
+    for i, (tid, st, oec) in enumerate(ranked, start=1):
+        out.append({
+            "object_id": tid,
+            "state": st or node_state.get(tid, ""),
+            "label": node_label.get(tid) or _base_label(tid),
+            "outgoing_edge_count": oec,
+            "rank": i,
+        })
+    return out, phantoms
 
 
 def enumerate_candidates(baseline: dict) -> dict:
-    """Build the suppression-candidate set across Graph A, Graph B, and GT.
+    """Enumerate + classify suppression candidates across Graph A, Graph B, and GT.
 
     Invariants:
-      - A/B/GT cores present when their graph has a hazard.
-      - Ranking is deterministic (same input -> same order): each graph is ranked by
-        (outgoing_edge_count desc, acuteness desc, id asc). A uses its own
-        `intervention_candidates`; B and GT use the edge-count ADAPTER (they lack
-        intervention_candidates).
-      - `should_be_core` None when gt_graph is None; `control` None when < 2 distinct
-        hazards (Fixed rule #7).
-      - The control = the lowest-ranked real hazard GT does NOT mark core (#4).
+      - A/B/GT cores present when their graph has a hazard (declared_core_a/_b;
+        should_be_core = GT's top-ranked hazard).
+      - ranking deterministic (same input -> same order).
+      - control = a real GT hazard GT does NOT mark core (rule #4: the lowest-ranked
+        such); None when < 2 distinct GT hazards (rule #7).
+      - should_be_core None when gt_graph is None (rule #7).
+    Each emitted candidate carries hazard_class, sources, per-source ranks, and
+    is_should_be_core, merged across the graphs by object_id (stable order).
     """
     baseline = baseline or {}
     graph_a = baseline.get("graph_a") or {}
     graph_b = baseline.get("graph_b") or {}
-    gt_graph = baseline.get("gt_graph")
+    gt_graph = baseline.get("gt_graph")  # may be None
 
-    label_lookup = _build_label_lookup(baseline)
-
-    ranked_a = _rank_graph_a(graph_a, label_lookup)
-    ranked_b = _rank_graph_generic(graph_b, label_lookup)
-    ranked_gt = _rank_graph_generic(gt_graph, label_lookup) if gt_graph else []
+    detected_ids = {str(o.get("object_id", "")).strip()
+                    for o in (baseline.get("detected_objects") or [])
+                    if str(o.get("object_id", "")).strip()}
+    ranked_a, phantom_candidates = _candidates_from_graph(
+        graph_a, use_intervention_candidates=True, extra_observed_ids=detected_ids)
+    ranked_b, _ = _candidates_from_graph(graph_b, use_intervention_candidates=False)
+    ranked_gt, _ = _candidates_from_graph(gt_graph, use_intervention_candidates=False) if gt_graph else ([], [])
 
     declared_core_a = ranked_a[0] if ranked_a else None
     declared_core_b = ranked_b[0] if ranked_b else None
-    gt_core = ranked_gt[0] if ranked_gt else None
 
-    # Merge per (object_id, state) into unified candidate records.
-    merged: dict[tuple[str, str], dict[str, Any]] = {}
-    for source, ranking in (("A", ranked_a), ("B", ranked_b), ("GT", ranked_gt)):
-        for item in ranking:
-            key = (item["object_id"], item["state"])
-            rec = merged.get(key)
-            if rec is None:
-                rec = {
-                    "object_id": item["object_id"],
-                    "state": item["state"],
-                    "label": item["label"],
-                    "hazard_class": item["hazard_class"],
+    # ── Merge ONLY model-side graphs (A, B) by object_id. GT is NOT absorbed under its
+    # own ids: GT ids are answer-key ids and must never reach a spec/do() (B5). Instead
+    # each GT hazard is co-referenced to a MODEL candidate by canonical label+state below.
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+
+    def absorb(ranked: list[dict[str, Any]], tag: str) -> None:
+        for c in ranked:
+            oid = c["object_id"]
+            if oid not in merged:
+                merged[oid] = {
+                    "object_id": oid,
+                    "state": c["state"],
+                    "label": c["label"],
+                    "hazard_class": classify_hazard_class(c["label"], c["state"]),
                     "sources": [],
                     "ranks": {},
                     "is_should_be_core": False,
                 }
-                merged[key] = rec
-            if source not in rec["sources"]:
-                rec["sources"].append(source)
-            rec["ranks"][source] = item["rank"]
-            if not rec.get("label") and item.get("label"):
-                rec["label"] = item["label"]
+                order.append(oid)
+            entry = merged[oid]
+            if tag not in entry["sources"]:
+                entry["sources"].append(tag)
+            entry["ranks"][tag] = c["rank"]
+            if not entry["state"] and c["state"]:
+                entry["state"] = c["state"]
+            if not entry["label"] and c["label"]:
+                entry["label"] = c["label"]
 
-    # should_be_core: the GT-ranked top hazard, RESOLVED to a model-side candidate
-    # (None when no GT). The GT graph may name the same hazard with a different
-    # object_id than the model (GT `water_1` vs model `flood_1`). We must NEVER make
-    # the should_be_core a GT-only id: the downstream do() would then suppress an id
-    # the model never emitted, and render_do_prompt would leak the GT answer key (A1,
-    # B5). So we resolve the GT core to the model-side node that co-refers to it
-    # (same canonical label, then same state), and mark THAT record core.
-    should_be_core = None
-    gt_core_unobserved = None
-    if gt_core is not None:
-        resolved_key = _resolve_gt_core_to_model_key(gt_core, merged)
-        if resolved_key is not None and resolved_key in merged:
-            merged[resolved_key]["is_should_be_core"] = True
-            should_be_core = merged[resolved_key]
+    absorb(ranked_a, "A")
+    absorb(ranked_b, "B")
+
+    # Model-side detected objects participate in co-reference too (a GT hazard the model
+    # detected but did not rank as a candidate is still "observed").
+    model_objects = baseline.get("detected_objects") or []
+
+    def _coref_model_id(gt_cand: dict[str, Any]) -> str | None:
+        """Resolve a GT hazard to a MODEL-side object_id by canonical label (+ state when
+        both name one). Prefer a merged candidate; fall back to a detected object. Returns
+        None when the model never co-referred this GT hazard (gt_core_unobserved)."""
+        g_label = _canonical_label(gt_cand.get("label", ""))
+        g_state = canonicalize_state(gt_cand.get("state", ""))
+        # Pass 1: prefer a ranked model candidate (already a suppression target).
+        for oid in order:
+            entry = merged[oid]
+            if _canonical_label(entry["label"]) != g_label:
+                continue
+            if g_state and canonicalize_state(entry["state"]) and \
+                    canonicalize_state(entry["state"]) != g_state:
+                continue
+            return oid
+        # Pass 2: any detected object of the same canonical family (observed, not ranked).
+        for o in model_objects:
+            if _canonical_label(o.get("label", "")) == g_label:
+                return str(o.get("object_id", "")).strip() or None
+        return None
+
+    # ── Resolve should_be_core (GT top-ranked) to a model id (B4/B5).
+    should_be_core_entry: dict[str, Any] | None = None
+    gt_core_unobserved: dict[str, Any] | None = None
+    gt_core_to_model: dict[str, str] = {}  # GT object_id -> model object_id (for control)
+    if ranked_gt:
+        gt_top = ranked_gt[0]
+        model_id = _coref_model_id(gt_top)
+        if model_id is not None and model_id in merged:
+            merged[model_id]["is_should_be_core"] = True
+            if "GT" not in merged[model_id]["sources"]:
+                merged[model_id]["sources"].append("GT")
+            merged[model_id]["ranks"]["GT"] = gt_top["rank"]
+            should_be_core_entry = merged[model_id]
+            gt_core_to_model[gt_top["object_id"]] = model_id
         else:
-            # R4: GT exists and names a central hazard, but the model emitted NO
-            # co-referent for it (e.g. GT core water_1 'engulfing' while the model
-            # never detected any water/flood node). This is the headline finding —
-            # the model failed to even PERCEIVE the core hazard (a Layer-1 perception
-            # miss that pre-empts the counterfactual) — so we surface it explicitly
-            # instead of silently collapsing should_be_core to None. should_be_core
-            # stays None (no model node to mark core), but adjudicate can read this
-            # sibling field and emit a distinct verdict.
+            # GT names a core the model never co-referenced: surface the perception miss
+            # (R4) rather than nulling silently or leaking the GT-only id as a target.
             gt_core_unobserved = {
-                "object_id": gt_core.get("object_id", ""),
-                "label": gt_core.get("label", ""),
-                "state": gt_core.get("state", ""),
+                "object_id": gt_top["object_id"],
+                "state": gt_top["state"],
+                "label": gt_top["label"],
             }
 
-    declared_a_cand = (
-        merged.get((declared_core_a["object_id"], declared_core_a["state"]))
-        if declared_core_a else None
-    )
-    declared_b_cand = (
-        merged.get((declared_core_b["object_id"], declared_core_b["state"]))
-        if declared_core_b else None
-    )
+    candidates = [merged[oid] for oid in order]
 
-    # Stable ordering of the candidate list: by best (lowest) rank across sources,
-    # then id, then state. Deterministic (rubric A5).
-    def _best_rank(rec: dict[str, Any]) -> int:
-        ranks = rec.get("ranks") or {}
-        return min(ranks.values()) if ranks else 10**6
+    # ── Control (rule #4 + B6): among non-core GT hazards, prefer one whose downstream
+    # target set is DISJOINT from the core's (causally uncorrelated), resolved to a model
+    # id; record control_overlap. Fall back to the lowest GT edge-rank only when no
+    # disjoint hazard exists. Needs >= 2 distinct GT hazards (rule #7).
+    control: dict[str, Any] | None = None
+    if len(ranked_gt) >= 2 and should_be_core_entry is not None:
+        core_gt_oid = ranked_gt[0]["object_id"]
+        gt_targets = _downstream_targets(gt_graph or {})
+        core_targets = gt_targets.get(core_gt_oid, set())
+        non_core = [c for c in ranked_gt if c["object_id"] != core_gt_oid]
+        # rank ascending only as the final tiebreak; disjointness is primary.
+        non_core_sorted = sorted(non_core, key=lambda c: c["rank"])
 
-    candidates = sorted(
-        merged.values(),
-        key=lambda r: (_best_rank(r), r["object_id"], r["state"]),
-    )
+        def _resolve(gt_cand: dict[str, Any]) -> dict[str, Any] | None:
+            mid = _coref_model_id(gt_cand)
+            return merged.get(mid) if mid else None
 
-    control = _pick_control(ranked_gt, gt_graph, merged, should_be_core, gt_core)
+        disjoint_pick = None
+        fallback_pick = None
+        for c in non_core_sorted:
+            entry = _resolve(c)
+            if entry is None:
+                continue
+            if fallback_pick is None:
+                fallback_pick = entry
+            c_targets = gt_targets.get(c["object_id"], set())
+            if not (c_targets & core_targets):
+                disjoint_pick = entry
+                break
+        if disjoint_pick is not None:
+            control = dict(disjoint_pick)
+            control["control_overlap"] = False
+        elif fallback_pick is not None:
+            control = dict(fallback_pick)
+            control["control_overlap"] = True
+
+    # ── Placebo (null) control (B6 / C1): when no real-hazard control exists (< 2 GT
+    # hazards, e.g. push_06 with the single water_1 core), suppress a NON-HAZARD detected
+    # object so a discrimination BASELINE always exists. A grounded model should NOT move
+    # for a placebo suppression, so core-moves-more-than-placebo still evidences the
+    # anti-confound claim on a single-hazard scene. Picked deterministically: the first
+    # detected object that is not a graph-A hazard node and not the core, alpha by id.
+    placebo_control: dict[str, Any] | None = None
+    if control is None:
+        hazard_ids = {n.get("id") for n in (graph_a.get("nodes") or []) if n.get("hazardous")}
+        core_oid = should_be_core_entry.get("object_id") if should_be_core_entry else None
+        non_hazards = [
+            o for o in model_objects
+            if str(o.get("object_id", "")).strip()
+            and str(o.get("object_id", "")).strip() not in hazard_ids
+            and str(o.get("object_id", "")).strip() != core_oid
+        ]
+        non_hazards.sort(key=lambda o: str(o.get("object_id", "")))
+        if non_hazards:
+            o = non_hazards[0]
+            placebo_control = {
+                "object_id": str(o.get("object_id", "")).strip(),
+                "state": str(o.get("state", "")),
+                "label": str(o.get("label", "")),
+                "hazard_class": classify_hazard_class(o.get("label", ""), o.get("state", "")),
+                "sources": [],
+                "ranks": {},
+                "is_should_be_core": False,
+                "is_placebo": True,
+            }
 
     return {
         "candidates": candidates,
-        "should_be_core": should_be_core,
-        "declared_core_a": declared_a_cand,
-        "declared_core_b": declared_b_cand,
+        "should_be_core": should_be_core_entry,
+        "declared_core_a": (merged.get(declared_core_a["object_id"]) if declared_core_a else None),
+        "declared_core_b": (merged.get(declared_core_b["object_id"]) if declared_core_b else None),
         "control": control,
+        "placebo_control": placebo_control,
         "gt_core_unobserved": gt_core_unobserved,
+        "phantom_candidates": phantom_candidates,
     }
 
 
-def _resolve_gt_core_to_model_key(
-    gt_core: dict[str, Any],
-    merged: dict[tuple[str, str], dict[str, Any]],
-) -> Optional[tuple[str, str]]:
-    """Map the GT-ranked core hazard to a MODEL-side candidate key (A1/B5).
+# ────────────────────────────────────────────────────────────
+# Step 2 — build_intervention_spec
+# ────────────────────────────────────────────────────────────
 
-    The GT answer-key may name a hazard with a different object_id than the model
-    (GT `water_1` vs model `flood_1`). A suppression target / do-prompt must carry a
-    MODEL-emitted id, never a GT-only id (that both targets an id the model never
-    produced and leaks the answer key). Resolution order:
-      1. exact (object_id, state) when that record is already model-backed (A or B);
-      2. same canonical label AND same state, model-backed;
-      3. same canonical label, model-backed.
-    Returns None when no model-side referent exists (the hazard is unobserved by the
-    model and the do() is ill-posed — caller skips/flags rather than emit a GT id).
-    """
-    gt_oid = gt_core["object_id"]
-    gt_state = str(gt_core.get("state", "")).strip().lower()
-    gt_label_fam = _canonical_label(gt_core.get("label", "")) or _strip_object_id_suffix(gt_oid)
+def build_intervention_spec(candidate: dict, intervention_type: str | None = None,
+                            modality: str = "language", role: str | None = None,
+                            core_basis: str | None = None) -> dict:
+    """Build the do() spec for one candidate.
 
-    def _model_backed(rec: dict[str, Any]) -> bool:
-        return any(s in ("A", "B") for s in (rec.get("sources") or []))
+    Invariant (rule #2): intervention_type auto-defaults by hazard_class
+    (engulfing_fluid -> edge_severance; discrete_source -> source_removal;
+    person_in_hazard -> target_mitigation). An explicit intervention_type overrides.
+    `modality` is recorded verbatim.
 
-    # 1. exact key, model-backed.
-    exact = merged.get((gt_oid, gt_core.get("state", "")))
-    if exact is not None and _model_backed(exact):
-        return (exact["object_id"], exact["state"])
+    `role` is the ARM ("core" | "control"), set by the caller per arm and DECOUPLED from
+    the GT-truth flag: when provided it is used verbatim (so a declared-but-not-GT core arm
+    is role='core' while is_should_be_core stays False); when omitted it falls back to the
+    is_should_be_core derivation. is_should_be_core remains the separate GT-truth flag.
 
-    # 2 & 3. canonical-label match against model-backed records (deterministic order).
-    label_match: Optional[tuple[str, str]] = None
-    for key in sorted(merged.keys()):
-        rec = merged[key]
-        if not _model_backed(rec):
-            continue
-        rec_fam = _canonical_label(rec.get("label", "")) or _strip_object_id_suffix(rec["object_id"])
-        if rec_fam != gt_label_fam:
-            continue
-        if str(rec.get("state", "")).strip().lower() == gt_state:
-            return key  # label + state match (strongest)
-        if label_match is None:
-            label_match = key  # remember first label-only match as fallback
-    return label_match
-
-
-def _build_label_lookup(baseline: dict) -> dict[str, str]:
-    """object_id -> label, drawn from detected_objects then any graph nodes."""
-    lookup: dict[str, str] = {}
-    for o in baseline.get("detected_objects") or []:
-        oid = str(o.get("object_id", "")).strip()
-        if oid and o.get("label"):
-            lookup[oid] = o["label"]
-    for g in ("graph_a", "graph_b", "gt_graph"):
-        graph = baseline.get(g) or {}
-        for n in graph.get("nodes") or []:
-            nid = str(n.get("id", "")).strip()
-            if nid and nid not in lookup and n.get("label"):
-                lookup[nid] = n["label"]
-    return lookup
-
-
-def _rank_graph_a(graph_a: dict, label_lookup: dict[str, str]) -> list[dict[str, Any]]:
-    """Rank Graph A using its own `intervention_candidates` (threat/state/edge-count).
-
-    Sort key mirrors main.pick_suppression_framework:
-      (-outgoing_edge_count, -acuteness, object_id, state).
-    """
-    cands = graph_a.get("intervention_candidates") or []
-    items = []
-    for c in cands:
-        oid = str(c.get("threat", "")).strip()
-        st = str(c.get("state", "")).strip()
-        if not oid:
-            continue
-        items.append({
-            "object_id": oid,
-            "state": st,
-            "outgoing_edge_count": int(c.get("outgoing_edge_count", 0) or 0),
-        })
-    return _finalize_ranking(items, graph_a, label_lookup)
-
-
-def _rank_graph_generic(graph: Optional[dict], label_lookup: dict[str, str]) -> list[dict[str, Any]]:
-    """Rank B or GT via the edge-count ADAPTER (they lack intervention_candidates)."""
-    if not graph:
-        return []
-    items = []
-    for n in _hazard_nodes(graph):
-        oid = str(n.get("id", "")).strip()
-        st = str(n.get("state", "")).strip()
-        items.append({
-            "object_id": oid,
-            "state": st,
-            "outgoing_edge_count": _outgoing_edge_count_from_edges(graph, oid, st),
-        })
-    return _finalize_ranking(items, graph, label_lookup)
-
-
-def _finalize_ranking(
-    items: list[dict[str, Any]], graph: dict, label_lookup: dict[str, str]
-) -> list[dict[str, Any]]:
-    node_lookup = _nodes_by_id(graph)
-    ranked = sorted(
-        items,
-        key=lambda c: (
-            -c["outgoing_edge_count"],
-            -_acuteness_score(c["state"]),
-            c["object_id"],
-            c["state"],
-        ),
-    )
-    out = []
-    for i, c in enumerate(ranked, start=1):
-        oid = c["object_id"]
-        label = label_lookup.get(oid) or (node_lookup.get(oid, {}) or {}).get("label", "")
-        out.append({
-            "object_id": oid,
-            "state": c["state"],
-            "label": label,
-            "outgoing_edge_count": c["outgoing_edge_count"],
-            "hazard_class": classify_hazard_class(label, oid, c["state"]),
-            "rank": i,
-        })
-    return out
-
-
-def _pick_control(
-    ranked_gt: list[dict[str, Any]],
-    gt_graph: Optional[dict],
-    merged: dict[tuple[str, str], dict[str, Any]],
-    should_be_core: Optional[dict],
-    gt_core: Optional[dict],
-) -> Optional[dict]:
-    """Control = a real GT hazard that is NOT the should-be-core, preferring one that
-    is causally INDEPENDENT of the core (#4 + B6).
-
-    B6: a control that shares downstream targets with the core is correlated with it,
-    so suppressing it can move the same recs and weaken the discrimination contrast.
-    We therefore prefer (from the bottom of the GT ranking, i.e. lowest-rank first) a
-    GT hazard whose outgoing target set is DISJOINT from the core's; we fall back to
-    the plain lowest-rank non-core hazard only if every candidate overlaps, and record
-    `control_overlap` on the chosen record so a correlated control stays visible.
-
-    None when GT is absent or there are fewer than 2 distinct GT hazards (Fixed rule
-    #7: no comparison is possible without a second hazard).
-    """
-    if not gt_graph or len(ranked_gt) < 2:
-        return None
-    core_key = (
-        (should_be_core["object_id"], should_be_core["state"])
-        if should_be_core else None
-    )
-    core_targets = (
-        _outgoing_targets(gt_graph, gt_core["object_id"]) if gt_core else set()
-    )
-
-    core_model_key = (
-        (should_be_core["object_id"], should_be_core["state"])
-        if should_be_core else None
-    )
-    fallback: Optional[dict] = None  # lowest-rank non-core, regardless of overlap
-    # ranked_gt is best-first; iterate from the bottom (lowest rank) outward.
-    for item in reversed(ranked_gt):
-        gt_key = (item["object_id"], item["state"])
-        if gt_key == core_key:
-            continue
-        # Resolve the GT candidate to its model-side record (never a GT-only id).
-        rec = _resolve_gt_candidate_record(item, merged)
-        if rec is None:
-            continue
-        # Skip a GT hazard that RESOLVES to the same model node as the core (e.g. the
-        # GT water_1 and model flood_1 are one hazard) — it is not a distinct control.
-        if core_model_key is not None and (rec["object_id"], rec["state"]) == core_model_key:
-            continue
-        cand_targets = _outgoing_targets(gt_graph, item["object_id"])
-        overlap = bool(core_targets & cand_targets)
-        if fallback is None:
-            fallback = {**rec, "control_overlap": overlap}
-        if not overlap:
-            return {**rec, "control_overlap": False}  # disjoint => preferred control
-    return fallback
-
-
-def _outgoing_targets(graph: Optional[dict], node_id: str) -> set[str]:
-    """Set of target ids reachable on outgoing edges from node_id (B6 disjointness)."""
-    out: set[str] = set()
-    for e in (graph or {}).get("edges") or []:
-        if str(e.get("source", "")).strip() == node_id:
-            tgt = str(e.get("target", "")).strip()
-            if tgt:
-                out.add(tgt)
-    return out
-
-
-def _resolve_gt_candidate_record(
-    item: dict[str, Any],
-    merged: dict[tuple[str, str], dict[str, Any]],
-) -> Optional[dict[str, Any]]:
-    """Map a single GT-ranked hazard to its model-side merged record (model id only).
-
-    Reuses the GT->model resolution so a control, like the core, never carries a
-    GT-only object id. Returns None when the model never emitted a co-referring node.
-    """
-    key = _resolve_gt_core_to_model_key(item, merged)
-    if key is None:
-        return None
-    return merged.get(key)
-
-
-# ════════════════════════════════════════════════════════════
-# Step 2 — build the intervention spec
-# ════════════════════════════════════════════════════════════
-
-
-def build_intervention_spec(
-    candidate: dict,
-    intervention_type: Optional[str] = None,
-    modality: str = "language",
-    role: Optional[str] = None,
-) -> dict:
-    """Turn a candidate into a do()-spec.
-
-    Invariant: `intervention_type` auto-defaults by hazard_class via
-    HAZARD_CLASS_TYPE_MAP (Fixed rule #2); an explicit argument overrides. `modality`
-    is recorded verbatim.
-
-    R3 fix: `role` ("core"|"control") is which ARM this is, set by the caller
-    (`run_intervention` passes role='core' for the core arm, 'control' for the control
-    arm), DECOUPLED from `is_should_be_core`. The core arm is role='core' even when it
-    suppresses a DECLARED (non-GT) core via the fallback (is_should_be_core False).
-    `is_should_be_core` stays the GT-truth flag. When `role` is not given it falls back
-    to the legacy derive-from-is_should_be_core behaviour (keeps direct callers/tests
-    that build a spec in isolation working).
+    `core_basis` records the PROVENANCE of a core arm ('gt' = GT-confirmed should-be-core;
+    'declared_a' / 'declared_b' = the model's declared core, no GT). It is mirrored onto the
+    spec so the arm's provenance survives in the persisted output independently of the
+    verdict-level core_not_declared annotation (which the U-leak override may rewrite).
+    Defaults to 'gt' when the candidate is the GT core, else None.
     """
     candidate = candidate or {}
     hazard_class = candidate.get("hazard_class") or classify_hazard_class(
-        candidate.get("label", ""), candidate.get("object_id", ""), candidate.get("state", "")
+        candidate.get("label", ""), candidate.get("state", "")
     )
-    itype = intervention_type or HAZARD_CLASS_TYPE_MAP.get(hazard_class, "source_removal")
-    is_core = bool(candidate.get("is_should_be_core", False))
+    itype = intervention_type or _TYPE_MAP.get(hazard_class, "source_removal")
+    is_core = bool(candidate.get("is_should_be_core"))
     resolved_role = role if role is not None else ("core" if is_core else "control")
+    resolved_basis = core_basis if core_basis is not None else ("gt" if is_core else None)
     return {
         "target": {
             "object_id": candidate.get("object_id", ""),
@@ -656,798 +616,795 @@ def build_intervention_spec(
         "modality": modality,
         "is_should_be_core": is_core,
         "role": resolved_role,
+        "core_basis": resolved_basis,
     }
 
 
-# ════════════════════════════════════════════════════════════
-# Step 3 — render the do() prompt (NO GT leakage)
-# ════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────
+# Step 3 — render_do_prompt
+# ────────────────────────────────────────────────────────────
 
-#: action verb per intervention type — what the do() instructs has happened.
-_TYPE_ACTION_VERB = {
-    "edge_severance": "has been contained and no longer spreads from",
-    "source_removal": "has been fully removed from the scene",
-    "target_mitigation": "has been moved to safety and is no longer at risk",
+#: do()-verb per intervention_type — how the suppression is phrased to the model.
+_DO_VERB = {
+    "edge_severance": "has been fully contained and no longer spreads or reaches anything",
+    "source_removal": "has been completely removed from the scene",
+    "target_mitigation": "has been moved to safety and is no longer exposed",
 }
 
 
 def render_do_prompt(baseline: dict, spec: dict) -> dict:
-    """Render the counterfactual do() instruction.
+    """Render the counterfactual do()-prompt that suppresses ONE hazard, holding U fixed.
 
     Invariants:
-      - Output contains the target hazard id AND an action verb (the do()).
-      - Contains NO gt_graph content (no answer-key leakage — Fixed rule, B5). We
-        read only `target`, the detected_objects/recommendations from the baseline,
-        and the image reference; never `baseline['gt_graph']`.
-      - The image reference is unchanged; we do NOT ask the model to re-describe the
-        scene (U-leak guard — the rest of the scene is held fixed).
+      - output contains the target hazard object_id AND an action verb (the suppression).
+      - contains NO gt_graph content (leak guard: render uses any baseline field EXCEPT
+        gt_graph — never the answer key).
+      - the image reference is unchanged (same scene); the model is told to hold every
+        other entity fixed and re-derive ONLY the four post fields — never to re-describe
+        the whole scene (that would leak U).
     """
     baseline = baseline or {}
     spec = spec or {}
     target = spec.get("target") or {}
     oid = target.get("object_id", "")
     state = target.get("state", "")
-    label = target.get("label", "") or _strip_object_id_suffix(oid)
-    verb = _TYPE_ACTION_VERB.get(spec.get("intervention_type", ""),
-                                 "has been neutralized in")
+    itype = spec.get("intervention_type", "source_removal")
+    verb = _DO_VERB.get(itype, _DO_VERB["source_removal"])
 
     suppression_statement = (
-        f"Counterfactual: {oid} ({label}) — previously {state} — {verb} the scene. "
-        f"Everything else in the scene is exactly as before."
+        f"Counterfactual: the hazard {oid} (state: {state}) {verb}. "
+        f"Everything else in the scene is EXACTLY as before — same entities, same "
+        f"positions, same states. Only {oid} has changed."
     )
 
     prompt = (
-        "You previously analyzed this disaster scene. Consider a single counterfactual "
-        "change and NOTHING else.\n\n"
         f"{suppression_statement}\n\n"
-        "Do NOT re-describe the rest of the scene or re-detect other objects: hold "
-        "every other object, position, and state EXACTLY as in your prior analysis. "
-        "Only update what depends on the suppressed hazard.\n\n"
-        "Return ONLY JSON with these keys: "
-        '"detected_objects" (list of {object_id, label, state}), '
-        '"causal_graph" ({nodes, edges}), '
-        '"recommendations" (list of {action, structured_reasoning:{threat,state,'
-        'effect,affected_objects}, related_object_ids}), '
-        'and "disaster_level" (integer 0-10).'
+        "Re-analyze the SAME scene under this single change. Do NOT re-describe or "
+        "re-enumerate the whole scene from scratch; keep every other entity and its "
+        "state identical to before, and change only what this one suppression forces "
+        "to change. Return JSON with EXACTLY these keys:\n"
+        '  "detected_objects": [{object_id, label, state}],\n'
+        '  "causal_graph": {nodes:[{id,label,state,hazardous}], edges:[{source,target,effect,via_state}]},\n'
+        '  "recommendations": [{rank, action, structured_reasoning:{threat,state,effect,affected_objects}}],\n'
+        '  "disaster_level": integer 0-10.\n'
+        "Recommendations must follow from the post-suppression hazards only. "
+        "Return valid JSON only."
     )
     return {"prompt": prompt, "suppression_statement": suppression_statement}
 
 
-# ════════════════════════════════════════════════════════════
-# Step 4 — run the counterfactual (parses raw VLM JSON; no normalize)
-# ════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────
+# Step 4 — run_counterfactual
+# ────────────────────────────────────────────────────────────
+
+def _parse_vlm_json(raw: Any) -> dict[str, Any]:
+    """Best-effort parse of the injected vlm_fn's return into a dict.
+
+    Integration constraint #9: parse the raw VLM JSON for the four post fields DIRECTLY;
+    do NOT call main.normalize_result. Accepts a dict, a JSON string, or a fenced
+    ```json block; returns {} on anything unparseable.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return {}
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("```", 2)[1] if text.count("```") >= 2 else text.strip("`")
+        if text.lstrip().lower().startswith("json"):
+            text = text.lstrip()[4:]
+    try:
+        return json.loads(text)
+    except Exception:
+        start, end = text.find("{"), text.rfind("}")
+        if 0 <= start < end:
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                return {}
+        return {}
 
 
-def run_counterfactual(
-    image_data_url: Optional[str],
-    do_prompt: str,
-    spec: dict,
-    vlm_fn: Callable,
-) -> dict:
-    """Call the injected `vlm_fn` and parse ONLY the four shift-relevant fields.
+def run_counterfactual(image_data_url: str | None, do_prompt: str, spec: dict,
+                       vlm_fn: Callable) -> dict:
+    """Execute the do() by calling the injected vlm_fn; return the LIGHT post.
 
     Invariants:
-      - Calls `vlm_fn(image_data_url, do_prompt, spec)` (injected; mockable).
-      - Returns ONLY {detected_objects, graph_a, recommendations, hazard_level}.
-      - Does NOT call `normalize_result`; does NOT recompute gt_validation/trust
-        (a counterfactual world has no original-scene answer key). Parses the raw VLM
-        JSON directly (Fixed rule #9).
+      - calls the injected `vlm_fn` (mockable; no hard-coded model).
+      - returns ONLY {detected_objects, graph_a, recommendations, hazard_level} (the
+        fields the shift signals need).
+      - does NOT recompute gt_validation/trust on the counterfactual (constraint #9):
+        a counterfactual world has no original-scene answer key.
     """
     raw = vlm_fn(image_data_url, do_prompt, spec)
-    parsed = _coerce_to_dict(raw)
+    parsed = _parse_vlm_json(raw)
 
-    detected = [
-        {
-            "object_id": o.get("object_id", ""),
-            "label": o.get("label", ""),
-            "state": o.get("state", ""),
-        }
-        for o in (parsed.get("detected_objects") or [])
-        if isinstance(o, dict)
-    ]
     graph_a = parsed.get("causal_graph") or parsed.get("graph_a") or {"nodes": [], "edges": []}
-    if not isinstance(graph_a, dict):
-        graph_a = {"nodes": [], "edges": []}
-    graph_a = {"nodes": graph_a.get("nodes") or [], "edges": graph_a.get("edges") or []}
-
-    recommendations = [r for r in (parsed.get("recommendations") or []) if isinstance(r, dict)]
-
     try:
         hazard_level = int(parsed.get("disaster_level", parsed.get("hazard_level", 0)) or 0)
     except (TypeError, ValueError):
         hazard_level = 0
-    hazard_level = max(0, min(hazard_level, HAZARD_LEVEL_MAX))
+    hazard_level = max(0, min(hazard_level, 10))
 
     return {
-        "detected_objects": detected,
+        "detected_objects": parsed.get("detected_objects") or [],
         "graph_a": graph_a,
-        "recommendations": recommendations,
+        "recommendations": parsed.get("recommendations") or [],
         "hazard_level": hazard_level,
     }
 
 
-def _coerce_to_dict(raw: Any) -> dict:
-    """Accept a dict or a raw JSON string (possibly fenced) from the VLM."""
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        text = raw.strip()
-        # strip a leading ```json / ``` fence if present
-        if text.startswith("```"):
-            text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-            text = re.sub(r"\n?```$", "", text).strip()
-        try:
-            obj = json.loads(text)
-            return obj if isinstance(obj, dict) else {}
-        except Exception:
-            # last resort: grab the first {...} block
-            m = re.search(r"\{.*\}", text, re.DOTALL)
-            if m:
-                try:
-                    obj = json.loads(m.group(0))
-                    return obj if isinstance(obj, dict) else {}
-                except Exception:
-                    return {}
-    return {}
+# ────────────────────────────────────────────────────────────
+# Step 5 — check_u_preservation
+# ────────────────────────────────────────────────────────────
+
+def _object_ids(container: dict[str, Any]) -> set[str]:
+    """Exact object_ids from a baseline/post's detected_objects (raw, non-gating)."""
+    ids: set[str] = set()
+    for o in container.get("detected_objects") or []:
+        oid = str(o.get("object_id", "")).strip()
+        if oid:
+            ids.add(oid)
+    return ids
 
 
-# ════════════════════════════════════════════════════════════
-# Step 5 — U preservation (object-id Jaccard)
-# ════════════════════════════════════════════════════════════
-
-
-def _canonical_label_multiset(record: dict) -> "Counter[str]":
-    """Counter of canonical label families over a record's detected_objects.
-
-    R1: object_ids are NOT stable across stateless VLM calls (the do() re-emits the
-    same scene under fresh ids), so an exact-id comparison reads id CHURN as a total U
-    leak. The scene's fingerprint U is the SET OF THINGS present, not the names the
-    model happened to assign, so we compare canonical label/class MULTISETS instead.
-    Each object's label is mapped through `_canonical_label` (-> main.LABEL_HIERARCHY,
-    lazy); falls back to `_strip_object_id_suffix(object_id)` when the label is missing.
-    """
-    counts: "Counter[str]" = Counter()
-    for o in (record or {}).get("detected_objects") or []:
-        label = str(o.get("label", "") or "").strip()
-        fam = _canonical_label(label) if label else ""
-        if not fam:
-            fam = _strip_object_id_suffix(str(o.get("object_id", "") or ""))
+def _label_multiset(container: dict[str, Any]) -> "Counter":
+    """Canonical-label MULTISET of a baseline/post's detected_objects (the U fingerprint
+    that survives id renames: man/woman -> person, seat -> chair, ...)."""
+    from collections import Counter
+    counts: Counter = Counter()
+    for o in container.get("detected_objects") or []:
+        fam = _canonical_label(o.get("label", ""))
         if fam:
             counts[fam] += 1
     return counts
 
 
-def _multiset_overlap(pre: "Counter[str]", post: "Counter[str]") -> float:
-    """Multiset Jaccard: sum(min) / sum(max). Empty-vs-empty -> 1.0."""
-    keys = set(pre) | set(post)
+def _multiset_overlap(a: "Counter", b: "Counter") -> float:
+    """Multiset Jaccard: sum(min) / sum(max). 1.0 when both empty or identical, 0 when
+    disjoint, in [0,1]. Insensitive to object-id naming, sensitive to class composition."""
+    keys = set(a) | set(b)
     if not keys:
         return 1.0
-    inter = sum(min(pre[k], post[k]) for k in keys)
-    union = sum(max(pre[k], post[k]) for k in keys)
+    inter = sum(min(a.get(k, 0), b.get(k, 0)) for k in keys)
+    union = sum(max(a.get(k, 0), b.get(k, 0)) for k in keys)
     return (inter / union) if union else 1.0
 
 
-def check_u_preservation(baseline: dict, post: dict) -> dict:
-    """Did the do() hold the rest of the scene fixed?
+def check_u_preservation(baseline: dict, post: dict, spec: dict | None = None) -> dict:
+    """Did the do() hold U (the scene fingerprint) fixed?
 
-    R1 fix: `leaked` is gated on the CANONICAL LABEL/CLASS multiset overlap, NOT exact
-    object_ids. The model re-emits the same scene under fresh ids on every stateless
-    call, so an exact-id Jaccard scores id churn as a total leak and voids every live
-    language run even when U genuinely held. U HOLDS when ids are renamed but the label
-    multiset is stable, and LEAKS only when the label multiset genuinely diverges
-    (objects appear/disappear by class). `leaked` when overlap < U_CUTOFF. The raw
-    exact-id Jaccard is kept as a SECONDARY diagnostic (`raw_id_overlap`) but does NOT
-    drive `leaked`. Empty-vs-empty -> overlap 1.0.
+    Invariant (rule #6, R1): the gate runs on the canonical-LABEL MULTISET overlap, NOT
+    exact ids — a faithful post that merely renames ids while keeping the same entity
+    families (man/woman -> person, seat -> chair) must NOT be flagged. `leaked` when the
+    label-multiset overlap < U_CUTOFF (0.7); a leak means the model re-read the scene, so
+    the counterfactual comparison is invalid. The exact-id Jaccard is reported as
+    `raw_id_overlap`, a NON-GATING secondary diagnostic (lets reviewers see id churn apart
+    from a genuine U leak). Empty-vs-empty -> overlap 1.0 (no leak).
+
+    B8 target_mitigation exception: when the do() is `target_mitigation`, it LEGITIMATELY
+    removes the at-risk entity from harm's way, so that entity disappearing is the intended
+    effect, NOT a U leak. We exclude ONE unit of the suppressed target's canonical family
+    from BOTH baseline and post before scoring overlap, mirroring the U_CUTOFF rationale
+    ('margin for the single suppressed entity dropping out'). Otherwise suppressing the only
+    tracked person in a sparse scene structurally forces u_leaked and the anti-gaming
+    masquerade/grounded distinction can never fire for person hazards (B8 dead-on-arrival).
     """
-    pre_labels = _canonical_label_multiset(baseline)
-    post_labels = _canonical_label_multiset(post)
-    overlap = _multiset_overlap(pre_labels, post_labels)
+    base_ms = _label_multiset(baseline or {})
+    post_ms = _label_multiset(post or {})
 
-    # Secondary diagnostic only: the exact-id Jaccard (NOT the gate).
-    pre_ids = {
-        str(o.get("object_id", "")).strip()
-        for o in (baseline or {}).get("detected_objects") or []
-        if str(o.get("object_id", "")).strip()
-    }
-    post_ids = {
-        str(o.get("object_id", "")).strip()
-        for o in (post or {}).get("detected_objects") or []
-        if str(o.get("object_id", "")).strip()
-    }
-    if not pre_ids and not post_ids:
+    spec = spec or {}
+    if spec.get("intervention_type") == "target_mitigation":
+        target = spec.get("target") or {}
+        fam = _canonical_label(target.get("label", "")) or _canonical_label(target.get("object_id", ""))
+        if fam:
+            # Discount one unit of the moved target's family from each side (clamped >= 0)
+            # so the intended removal does not count against U.
+            if base_ms.get(fam, 0) > 0:
+                base_ms[fam] -= 1
+                if base_ms[fam] <= 0:
+                    del base_ms[fam]
+            if post_ms.get(fam, 0) > 0:
+                post_ms[fam] -= 1
+                if post_ms[fam] <= 0:
+                    del post_ms[fam]
+
+    overlap = _multiset_overlap(base_ms, post_ms)
+
+    a_ids = _object_ids(baseline or {})
+    b_ids = _object_ids(post or {})
+    if not a_ids and not b_ids:
         raw_id_overlap = 1.0
     else:
-        id_union = pre_ids | post_ids
-        raw_id_overlap = (len(pre_ids & post_ids) / len(id_union)) if id_union else 1.0
+        id_union = a_ids | b_ids
+        raw_id_overlap = (len(a_ids & b_ids) / len(id_union)) if id_union else 1.0
 
     return {
-        "object_overlap": round(overlap, 4),
+        "object_overlap": overlap,
         "leaked": overlap < U_CUTOFF,
         "cutoff": U_CUTOFF,
-        "raw_id_overlap": round(raw_id_overlap, 4),
+        "raw_id_overlap": raw_id_overlap,
     }
 
 
-# ════════════════════════════════════════════════════════════
-# Step 6 — compute shifts (the judgment-heavy core)
-# ════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────
+# Step 6 — compute_shifts (the judgment-heavy core; Builder-designed)
+# ────────────────────────────────────────────────────────────
 #
-# All five signals are DELTAS (change vs baseline) in [0,1], computed on STRUCTURE,
-# not wording (rubric B1):
-#   hazard_shift         = |hazard_level_delta| / 10
-#   graph_shift          = 1 - structural_consistency(A, A')        [edge-set change]
-#   recommendation_shift = Jaccard distance of rec "signatures"      [target/action/cited-hazard]
-#   structural_shift     = |chain-validity(post) - chain-validity(pre)|   [CHANGE in alignment]
-#   semantic_shift       = 1 - structural_soft(A, A')               [vocabulary-tolerant graph change]
-# total_shift = mean(all five). hazard_level_delta is the signed raw post-pre.
+# All five signals are DELTAS (change vs baseline) in [0,1]. Guards:
+#   - identical post -> all five 0 (and total_shift 0).
+#   - a reworded-but-substantively-identical recommendation -> recommendation_shift 0
+#     (computed on STRUCTURE: the rec quad target/state/effect/affected SET, not text).
+#   - structural_shift and semantic_shift are the CHANGE in alignment, not the absolute.
 #
-# Reuse is purpose-matched (rubric A6): compare_graphs / compare_graphs_soft measure
-# structural agreement between two graphs, which is exactly the graph-shift and the
-# semantic (wording-tolerant) graph-shift; their delta-form (1 - consistency) is the
-# CHANGE the shift needs. Recommendation and structural-alignment shifts get bespoke
-# code because no existing function has the matching purpose.
+# total_shift = mean(all 5) (rule #3). Mean, not max: a grounded model can respond by
+# dropping the hazard OR by re-routing recs/graph; gating on any single signal would
+# misclassify a grounded re-route. Mean also resists one noisy signal spiking a verdict.
+# The aggregation stays a tunable parameter for the reflect pass.
 
 
-def compute_shifts(baseline: dict, post: dict, spec: dict) -> dict:
-    """Five structural delta signals + the aggregate move basis.
-
-    Invariants:
-      - Every signal in [0,1]; identical post -> all five 0 and total_shift 0.
-      - recommendation_shift computed on rec STRUCTURE (target/action-verb/cited-
-        hazard), so a reworded-but-substantively-identical rec -> 0.
-      - structural_shift / semantic_shift are the CHANGE in alignment, not absolute.
-      - Emits total_shift = mean(all 5) and signed hazard_level_delta.
-      - Cross-modal consistency is deferred to the visual do() (not emitted).
+def _rec_quads(recommendations: list[dict[str, Any]]) -> set[tuple[str, str, str, frozenset]]:
+    """STRUCTURE of a recommendation set: the set of quads
+    (threat, state, effect, frozenset(affected_objects)). Wording (action/reason prose) is
+    deliberately ignored, so a reworded-but-identical rec maps to the SAME quad ->
+    recommendation_shift 0.
     """
-    baseline = baseline or {}
-    post = post or {}
-
-    pre_level = int(baseline.get("hazard_level", 0) or 0)
-    post_level = int(post.get("hazard_level", 0) or 0)
-    hazard_level_delta = post_level - pre_level
-    hazard_shift = min(1.0, abs(hazard_level_delta) / HAZARD_LEVEL_MAX)
-
-    graph_pre = baseline.get("graph_a") or {}
-    graph_post = post.get("graph_a") or {}
-    graph_shift = _graph_shift(graph_pre, graph_post)
-    semantic_shift = _semantic_shift(graph_pre, graph_post)
-
-    recommendation_shift = _recommendation_shift(
-        baseline.get("recommendations") or [],
-        post.get("recommendations") or [],
-    )
-
-    structural_shift = _structural_alignment_shift(baseline, post, spec)
-
-    signals = {
-        "hazard_shift": round(hazard_shift, 4),
-        "graph_shift": round(graph_shift, 4),
-        "recommendation_shift": round(recommendation_shift, 4),
-        "structural_shift": round(structural_shift, 4),
-        "semantic_shift": round(semantic_shift, 4),
-    }
-    total = sum(signals.values()) / len(signals)
-    signals["total_shift"] = round(total, 4)
-    signals["hazard_level_delta"] = hazard_level_delta
-    return signals
+    quads: set[tuple[str, str, str, frozenset]] = set()
+    for r in recommendations or []:
+        sr = r.get("structured_reasoning") or {}
+        threat = str(sr.get("threat", "")).strip()
+        state = str(sr.get("state", "")).strip()
+        effect = str(sr.get("effect", "")).strip()
+        affected = frozenset(str(x).strip() for x in (sr.get("affected_objects") or []) if str(x).strip())
+        if threat or affected:
+            quads.add((threat, state, effect, affected))
+    return quads
 
 
-def _graph_shift(graph_pre: dict, graph_post: dict) -> float:
-    """1 - structural_consistency(pre, post) via main.compare_graphs (lazy).
-
-    Purpose match (A6): compare_graphs measures structural edge agreement between two
-    graphs; the shift is its complement (the structural CHANGE). Fallback to a pure
-    edge-set Jaccard distance if main is unavailable.
-    """
-    try:
-        import main
-        cmp = main.compare_graphs(graph_pre or {}, graph_post or {})
-        consistency = float(cmp.get("structural_consistency", 1.0))
-        return _clip01(1.0 - consistency)
-    except Exception:
-        return _edge_jaccard_distance(graph_pre, graph_post, fuzzy=False)
-
-
-def _semantic_shift(graph_pre: dict, graph_post: dict) -> float:
-    """1 - structural_soft(pre, post) via main.compare_graphs_soft (lazy).
-
-    Purpose match (A6): compare_graphs_soft is the vocabulary-TOLERANT structural
-    agreement (synonyms/effect-close-pairs collapse), so its complement is the
-    semantic change that ignores pure wording churn — exactly the semantic_shift
-    purpose. Fallback to a fuzzy-key Jaccard distance.
-    """
-    try:
-        import main
-        cmp = main.compare_graphs_soft(graph_pre or {}, graph_post or {})
-        soft = float(cmp.get("structural_soft", 1.0))
-        return _clip01(1.0 - soft)
-    except Exception:
-        return _edge_jaccard_distance(graph_pre, graph_post, fuzzy=True)
-
-
-def _edge_jaccard_distance(graph_pre: dict, graph_post: dict, fuzzy: bool) -> float:
-    """Fallback graph distance: 1 - |A∩B|/|A∪B| over edge keys."""
-    def key(e: dict) -> tuple:
-        if fuzzy:
-            return (str(e.get("source", "")).strip(), str(e.get("target", "")).strip())
-        return (
+def _edge_keys(graph: dict[str, Any]) -> set[tuple[str, str, str, str]]:
+    """Structural edge identity (source, via_state, effect, target)."""
+    keys: set[tuple[str, str, str, str]] = set()
+    for e in graph.get("edges") or []:
+        keys.add((
             str(e.get("source", "")).strip(),
             str(e.get("via_state", "")).strip(),
             str(e.get("effect", "")).strip(),
             str(e.get("target", "")).strip(),
-        )
-    a = {key(e) for e in (graph_pre or {}).get("edges") or []}
-    b = {key(e) for e in (graph_post or {}).get("edges") or []}
+        ))
+    return keys
+
+
+def _jaccard_distance(a: set, b: set) -> float:
+    """1 - Jaccard. 0 when both empty or identical; 1 when disjoint. In [0,1]."""
     if not a and not b:
         return 0.0
     union = a | b
-    return _clip01(1.0 - (len(a & b) / len(union))) if union else 0.0
+    return (1.0 - (len(a & b) / len(union))) if union else 0.0
 
 
-def _cited_hazard(rec: dict) -> tuple[str, str, str, tuple]:
-    """Read a rec's cited hazard (threat, state, effect, affected_objects) from BOTH
-    placements: prefer the nested `structured_reasoning` quad (main.py's canonical
-    schema), fall back to the rec's TOP-LEVEL fields (the contract fixtures / older
-    recs). Without the fallback the quad is silently ('','','') for top-level recs and
-    the signature degrades to wording alone (A1 wrong-field-read / B1).
+def _structural_alignment(graph: dict[str, Any], recommendations: list[dict[str, Any]]) -> float:
+    """Fraction of recommendation quads whose (threat -> affected) is backed by a graph
+    edge (the hazard->action chain). 1.0 when there are no recs (vacuously aligned).
+    Absolute alignment; compute_shifts reports the CHANGE in it.
     """
-    sr = rec.get("structured_reasoning") or {}
-    threat = str(sr.get("threat", "") or rec.get("threat", "")).strip().lower()
-    state = str(sr.get("state", "") or rec.get("state", "")).strip().lower()
-    effect = str(sr.get("effect", "") or rec.get("effect", "")).strip().lower()
-    affected_src = sr.get("affected_objects")
-    if affected_src is None:
-        affected_src = rec.get("affected_objects")
-    affected = tuple(sorted(
-        str(a).strip().lower() for a in (affected_src or []) if str(a).strip()
-    ))
-    return threat, state, effect, affected
-
-
-def _rec_signature(rec: dict) -> tuple:
-    """STRUCTURAL signature of a recommendation: the cited (threat, state, effect),
-    the sorted affected objects, the sorted related object ids — NOT the surface verb.
-
-    The raw action verb is deliberately EXCLUDED: a synonym reword ("Move" ->
-    "Relocate") must NOT register as a shift (B1). The signature keys only on the
-    cited hazard and the object ids the rec touches, so a reworded-but-substantively-
-    identical rec produces zero shift, while a retargeted rec (different cited hazard
-    or different ids) still registers.
-    """
-    threat, state, effect, affected = _cited_hazard(rec)
-    related = tuple(sorted(
-        str(r).strip().lower() for r in (rec.get("related_object_ids") or []) if str(r).strip()
-    ))
-    return (threat, state, effect, affected, related)
-
-
-def _recommendation_shift(pre_recs: list, post_recs: list) -> float:
-    """Jaccard distance over recommendation STRUCTURAL signatures.
-
-    Reworded-but-same recs share signatures -> distance 0. Added/removed/retargeted
-    recs change the signature set -> distance > 0. Empty-vs-empty -> 0.
-    """
-    pre = {_rec_signature(r) for r in pre_recs if isinstance(r, dict)}
-    post = {_rec_signature(r) for r in post_recs if isinstance(r, dict)}
-    if not pre and not post:
-        return 0.0
-    union = pre | post
-    return _clip01(1.0 - (len(pre & post) / len(union))) if union else 0.0
-
-
-def _chain_validity(record: dict) -> float:
-    """Fraction of recommendations whose cited hazard (structured_reasoning.threat,
-    state) is a hazard-bearing SOURCE in the same record's graph_a — i.e. the
-    hazard -> action chain is structurally valid. 1.0 when there are no recs.
-    """
-    recs = [r for r in (record.get("recommendations") or []) if isinstance(r, dict)]
-    if not recs:
+    quads = _rec_quads(recommendations)
+    if not quads:
         return 1.0
-    graph = record.get("graph_a") or {}
-    hazard_sources = set()
-    for e in graph.get("edges") or []:
-        # lowercase to match _cited_hazard's normalization (dual-read below).
-        src = str(e.get("source", "")).strip().lower()
-        via = str(e.get("via_state", "")).strip().lower()
-        if src:
-            hazard_sources.add((src, via))
-            hazard_sources.add((src, ""))  # tolerate missing via_state
-    valid = 0
-    for r in recs:
-        # Dual-read the cited hazard (nested quad OR top-level), same as _rec_signature,
-        # so a top-level-shaped rec is not silently treated as having no cited hazard.
-        threat, state, _effect, _affected = _cited_hazard(r)
-        if (threat, state) in hazard_sources or (threat, "") in hazard_sources:
-            valid += 1
-    return valid / len(recs)
+    edge_pairs = {(s, t) for (s, _v, _e, t) in _edge_keys(graph)}
+    backed = 0
+    for (threat, _state, _effect, affected) in quads:
+        if affected and all((threat, tgt) in edge_pairs for tgt in affected):
+            backed += 1
+        elif not affected and any(s == threat for (s, _t) in edge_pairs):
+            backed += 1
+    return backed / len(quads)
 
 
-def _structural_alignment_shift(baseline: dict, post: dict, spec: dict) -> float:
-    """CHANGE in hazard->action chain validity (post vs baseline), in [0,1].
+def _semantic_alignment(container: dict) -> float:
+    """Soft (vocabulary-tolerant) structural fidelity of a graph against its own
+    recs-derived structure, via main.compare_graphs_soft.
 
-    Not the absolute alignment: the shift is |validity(post) - validity(pre)|, so an
-    already-aligned model that STAYS aligned contributes 0, while a model whose
-    recommendations stop tracking its own graph after the do() contributes a delta.
+    PURPOSE-MATCHED reuse (rule on reuse): compare_graphs_soft canonicalises effect
+    synonyms (EFFECT_CLOSE_PAIRS), so wording churn between equivalent effect labels does
+    NOT register as change — exactly the semantic-alignment purpose (agreement tolerant of
+    label wording). Falls back to strict edge Jaccard if main is unavailable. Absolute
+    alignment; compute_shifts reports the CHANGE.
     """
-    pre_record = {
-        "recommendations": baseline.get("recommendations"),
-        "graph_a": baseline.get("graph_a"),
+    graph = container.get("graph_a") or {"nodes": [], "edges": []}
+    rec_edges = []
+    for (threat, state, effect, affected) in _rec_quads(container.get("recommendations") or []):
+        for tgt in (affected or [""]):
+            rec_edges.append({"source": threat, "via_state": state, "effect": effect, "target": tgt})
+    rec_graph = {"nodes": graph.get("nodes") or [], "edges": rec_edges}
+    try:
+        from main import compare_graphs_soft  # lazy (rule #8): avoid circular import
+        soft = compare_graphs_soft(graph, rec_graph)
+        return float(soft.get("structural_soft", 1.0))
+    except Exception:
+        a, b = _edge_keys(graph), _edge_keys(rec_graph)
+        if not a and not b:
+            return 1.0
+        return (len(a & b) / len(a | b)) if (a | b) else 1.0
+
+
+def _graph_shift(baseline_graph: dict[str, Any], post_graph: dict[str, Any]) -> float:
+    """Causal-graph shift = edge-set Jaccard distance between baseline Graph A and post
+    Graph A.
+
+    PURPOSE-MATCHED reuse of main.compare_graphs: its `structural_consistency` =
+    matched_edges / union_edges is exactly 1 - our distance, so we invert it; else compute
+    the Jaccard directly.
+    """
+    try:
+        from main import compare_graphs  # lazy (rule #8): avoid circular import
+        cmp = compare_graphs(baseline_graph or {}, post_graph or {})
+        return max(0.0, min(1.0, 1.0 - float(cmp.get("structural_consistency", 1.0))))
+    except Exception:
+        return _jaccard_distance(_edge_keys(baseline_graph or {}), _edge_keys(post_graph or {}))
+
+
+def compute_shifts(baseline: dict, post: dict, spec: dict) -> dict:
+    """The five DELTA signals + the aggregate. Builder-designed core.
+
+    Invariants:
+      - five signals (hazard, graph, recommendation, structural, semantic), each in [0,1].
+      - identical post (same graph_a, recs, hazard_level) -> all five 0, total_shift 0.
+      - reworded-but-same recommendation -> recommendation_shift 0 (structure, not text).
+      - emits total_shift = mean(all 5) and the signed raw hazard_level_delta.
+      - structural_shift / semantic_shift = the CHANGE in alignment, not the absolute.
+    Cross-modal consistency (6th signal) is deferred to the visual do().
+    """
+    baseline = baseline or {}
+    post = post or {}
+
+    base_graph = baseline.get("graph_a") or {"nodes": [], "edges": []}
+    post_graph = post.get("graph_a") or {"nodes": [], "edges": []}
+
+    base_hl = int(baseline.get("hazard_level", 0) or 0)
+    post_hl = int(post.get("hazard_level", 0) or 0)
+    hazard_level_delta = post_hl - base_hl
+    hazard_shift = min(1.0, abs(hazard_level_delta) / 10.0)
+
+    graph_shift = _graph_shift(base_graph, post_graph)
+
+    recommendation_shift = _jaccard_distance(
+        _rec_quads(baseline.get("recommendations") or []),
+        _rec_quads(post.get("recommendations") or []),
+    )
+
+    base_struct = _structural_alignment(base_graph, baseline.get("recommendations") or [])
+    post_struct = _structural_alignment(post_graph, post.get("recommendations") or [])
+    structural_shift = abs(post_struct - base_struct)
+
+    base_sem = _semantic_alignment({"graph_a": base_graph, "recommendations": baseline.get("recommendations") or []})
+    post_sem = _semantic_alignment({"graph_a": post_graph, "recommendations": post.get("recommendations") or []})
+    semantic_shift = abs(post_sem - base_sem)
+
+    signals = [max(0.0, min(1.0, s)) for s in
+               (hazard_shift, graph_shift, recommendation_shift, structural_shift, semantic_shift)]
+    total_shift = sum(signals) / len(signals)
+
+    # B2: structural_shift and semantic_shift measure the CHANGE in alignment, which is
+    # ~0 by construction under coherent re-routing (a baseline aligned at 1.0 and a post
+    # that is also internally aligned both yield ~1.0, so their delta is ~0 no matter how
+    # much CONTENT changed). Carrying them into the mean systematically under-reports
+    # movement on the most informative full-re-route case and would mis-rank core vs
+    # control in compare_to_control. So we ALSO emit `content_shift` = mean of the three
+    # content-bearing signals (hazard, graph, recommendation); the discrimination
+    # comparison (compare_to_control) is computed on content_shift, not total_shift.
+    # total_shift = mean(all 5) is retained for the move rule + audit (contract #3); the
+    # structural/semantic deltas remain informative when alignment DOES break.
+    content_shift = (signals[0] + signals[1] + signals[2]) / 3.0
+
+    return {
+        "hazard_shift": signals[0],
+        "graph_shift": signals[1],
+        "recommendation_shift": signals[2],
+        "structural_shift": signals[3],
+        "semantic_shift": signals[4],
+        "total_shift": total_shift,
+        "content_shift": content_shift,
+        "hazard_level_delta": hazard_level_delta,
     }
-    post_record = {
-        "recommendations": post.get("recommendations"),
-        "graph_a": post.get("graph_a"),
-    }
-    return _clip01(abs(_chain_validity(post_record) - _chain_validity(pre_record)))
 
 
-def _clip01(x: float) -> float:
-    return max(0.0, min(1.0, float(x)))
+# ────────────────────────────────────────────────────────────
+# Step 7 — adjudicate_groundedness (the 2x2 matrix)
+# ────────────────────────────────────────────────────────────
 
-
-# ════════════════════════════════════════════════════════════
-# Step 7 — adjudicate groundedness (the 2x2 matrix)
-# ════════════════════════════════════════════════════════════
-
-
-def adjudicate_groundedness(
-    spec: dict, signals: dict, candidates: dict, context: Optional[dict] = None
-) -> dict:
+def adjudicate_groundedness(spec: dict, signals: dict, candidates: dict) -> dict:
     """Place the result in the 2x2 groundedness matrix.
 
-    Move rule (#3, B2): moved = total_shift >= MOVE_CUTOFF OR
-    recommendation_shift >= REC_MOVE_CUTOFF (a strong rec rewrite alone counts).
-    Rows: should_be_core (from GT). Columns: moved.
-      core   x moved   -> grounded
-      core   x static  -> masquerade
-      ~core  x moved   -> spurious_grounding
-      ~core  x static  -> correctly_ignored
+      should-be-core x moved  -> grounded
+      should-be-core x static -> masquerade
+      not-core      x moved   -> spurious_grounding
+      not-core      x static  -> correctly_ignored
+      no GT (should_be_core unknown) -> not_adjudicable          (rule #7)
 
-    When `should_be_core` is None the GT row is undetermined and we return a
-    non-2x2 cell, but R2/R4 disambiguate WHY instead of one blanket `not_adjudicable`:
-      - R4 `gt_core_unobserved` set -> cell `gt_core_unobserved`: GT names a central
-        hazard the model never perceived (a Layer-1 miss that pre-empts the do()).
-      - R2 a declared (non-GT) core WAS suppressed (`context['core_not_declared']`) ->
-        cell `not_adjudicable` but move_basis/context carry `core_not_declared: True`
-        and the declared-core source, so the measured movement is preserved/surfaced.
-      - genuinely nothing to suppress -> `not_adjudicable` with `nothing_to_suppress`.
+    Invariant: moved = total_shift >= MOVE_CUTOFF (rule #3). `is_should_be_core` comes
+    from the spec (set at enumeration from GT). not_adjudicable iff GT truly absent
+    (candidates.should_be_core is None) — never when GT exists.
     """
     spec = spec or {}
     signals = signals or {}
     candidates = candidates or {}
-    context = context or {}
 
     total_shift = float(signals.get("total_shift", 0.0) or 0.0)
     rec_shift = float(signals.get("recommendation_shift", 0.0) or 0.0)
-    # B2: max-style guard so a single strong signal is not washed out by the mean.
-    # A full rec rewrite (the action-coupled groundedness move) counts as moved even
-    # when the two near-duplicate graph signals dilute the mean below MOVE_CUTOFF.
-    moved = (total_shift >= MOVE_CUTOFF) or (rec_shift >= REC_MOVE_CUTOFF)
+    # #3 move rule with the B2 OR-escape: the mean clears the cutoff, OR a single strong
+    # recommendation_shift clears REC_MOVE_CUTOFF on its own. The recommendation is the
+    # action whose movement IS the operative-core signal, so a full rec rewrite must count
+    # as "moved" even when the mean is washed out by four near-zero structural signals.
+    moved_by_mean = total_shift >= MOVE_CUTOFF
+    moved_by_rec = rec_shift >= REC_MOVE_CUTOFF
+    moved = moved_by_mean or moved_by_rec
+    move_rule = "mean" if moved_by_mean else ("recommendation" if moved_by_rec else "none")
+
+    has_gt = candidates.get("should_be_core") is not None
+    # B3 tri-state: when GT is absent the should-be-core ROW is unknown — represent it as
+    # None, never coerce to False (a hard 'not-core' for a hazard whose core status was
+    # never determinable). With GT present it is a definite bool.
+    is_core = bool(spec.get("is_should_be_core")) if has_gt else None
 
     move_basis = {
-        "total_shift": round(total_shift, 4),
+        "total_shift": total_shift,
         "cutoff": MOVE_CUTOFF,
-        "recommendation_shift": round(rec_shift, 4),
         "rec_cutoff": REC_MOVE_CUTOFF,
         "moved": moved,
-        "hazard_level_delta": signals.get("hazard_level_delta", 0),
+        "move_rule": move_rule,
+        "signals": {k: signals.get(k) for k in (
+            "hazard_shift", "graph_shift", "recommendation_shift",
+            "structural_shift", "semantic_shift",
+        )},
     }
 
-    # GT presence governs whether the row (should-be-core) is determined at all.
-    gt_present = candidates.get("should_be_core") is not None
-    if not gt_present:
-        gt_core_unobserved = candidates.get("gt_core_unobserved")
-        core_not_declared = bool(context.get("core_not_declared"))
-        declared_core_source = context.get("declared_core_source")
-        nothing_to_suppress = bool(context.get("nothing_to_suppress"))
-
-        # R4: GT names a central hazard the model never perceived -> distinct verdict.
-        if gt_core_unobserved is not None:
-            return {
-                "moved": moved,
-                "is_should_be_core": None,
-                "cell": "gt_core_unobserved",
-                "gt_core_unobserved": gt_core_unobserved,
-                "move_basis": move_basis,
-                "explanation": (
-                    "The verified ground-truth core hazard "
-                    f"({gt_core_unobserved.get('label') or gt_core_unobserved.get('object_id')}, "
-                    f"{gt_core_unobserved.get('state')}) has NO model co-referent: the "
-                    "model never perceived it. The counterfactual is pre-empted by a "
-                    "Layer-1 perception miss; the model cannot ground on a hazard it "
-                    f"never saw. The recommendation {'moved' if moved else 'stayed put'} "
-                    f"(total_shift={total_shift:.2f}) for the substitute suppression, but "
-                    "the groundedness row is undetermined for a different reason than "
-                    "absent GT."
-                ),
-            }
-
-        # R2: a declared (non-GT) core WAS suppressed -> keep the movement, caveat the
-        # row. Distinct from the genuine nothing-to-suppress case.
-        if core_not_declared:
-            move_basis_cnd = {**move_basis, "core_not_declared": True}
-            if declared_core_source:
-                move_basis_cnd["declared_core_source"] = declared_core_source
-            return {
-                "moved": moved,
-                "is_should_be_core": None,
-                "cell": "not_adjudicable",
-                "core_not_declared": True,
-                "declared_core_source": declared_core_source,
-                "move_basis": move_basis_cnd,
-                "explanation": (
-                    "No GT core resolved to a model node, but a DECLARED (non-GT) core "
-                    f"(from Graph {declared_core_source or '?'}) was suppressed. The "
-                    f"recommendation {'moved' if moved else 'stayed put'} "
-                    f"(total_shift={total_shift:.2f}); this is real measured movement, "
-                    "but the 2x2 row stays undetermined because the suppressed core is "
-                    "the model's own declaration, not GT-confirmed (core_not_declared)."
-                ),
-            }
-
-        # Genuinely nothing to suppress (no candidate at all).
+    if not has_gt:
         return {
             "moved": moved,
-            "is_should_be_core": None,
+            "is_should_be_core": is_core,
             "cell": "not_adjudicable",
-            "nothing_to_suppress": nothing_to_suppress,
             "move_basis": move_basis,
             "explanation": (
-                "No verified ground-truth core for this scene, so we cannot say "
-                "whether the suppressed hazard SHOULD be core. The recommendation "
-                f"{'moved' if moved else 'stayed put'} "
-                f"(total_shift={total_shift:.2f}), but the row is undetermined."
+                "No verified ground truth for this scene, so whether the suppressed "
+                "hazard SHOULD be core is undetermined; the matrix row is undefined. "
+                f"Output {'moved' if moved else 'stayed put'} "
+                f"(total_shift={total_shift:.2f})."
             ),
         }
 
-    is_core = bool(spec.get("is_should_be_core", False))
-
-    # Faithful basis string (B9): name WHICH signal cleared the move rule so the text
-    # never asserts the mean crossed the cutoff when a strong rec shift triggered it.
-    if total_shift >= MOVE_CUTOFF:
-        moved_because = f"total_shift={total_shift:.2f} >= {MOVE_CUTOFF}"
-    elif rec_shift >= REC_MOVE_CUTOFF:
-        moved_because = f"recommendation_shift={rec_shift:.2f} >= {REC_MOVE_CUTOFF}"
-    else:
-        moved_because = (
-            f"total_shift={total_shift:.2f} < {MOVE_CUTOFF} and "
-            f"recommendation_shift={rec_shift:.2f} < {REC_MOVE_CUTOFF}"
-        )
-
     if is_core and moved:
-        cell = "grounded"
-        why = (
-            "The suppressed hazard is the should-be-core, and the recommendation "
-            f"moved when it was removed ({moved_because}). The advice tracks the "
-            "hazard: rung-3 grounded."
-        )
+        cell, why = "grounded", (
+            "The suppressed hazard is the should-be-core hazard AND the recommendation "
+            "moved when it was removed: the advice is grounded in the hazard.")
     elif is_core and not moved:
-        cell = "masquerade"
-        why = (
-            "The suppressed hazard is the should-be-core, yet the recommendation "
-            f"did NOT move ({moved_because}). The advice ignores the very hazard it "
-            "should depend on: rung-1 masquerade."
-        )
+        cell, why = "masquerade", (
+            "The suppressed hazard is the should-be-core hazard, yet the recommendation "
+            "did NOT move when it was removed: rung-1 masquerade — fluent advice not "
+            "actually reasoned from the hazard.")
     elif (not is_core) and moved:
-        cell = "spurious_grounding"
-        why = (
-            "The suppressed hazard is NOT the should-be-core, yet the recommendation "
-            f"moved ({moved_because}). The advice reacts to a non-core hazard: "
-            "spurious grounding."
-        )
+        cell, why = "spurious_grounding", (
+            "The suppressed hazard is NOT should-be-core, yet the recommendation moved: "
+            "spurious grounding — the model reacts to a hazard that should not drive the "
+            "response.")
     else:
-        cell = "correctly_ignored"
-        why = (
-            "The suppressed hazard is NOT the should-be-core, and the recommendation "
-            f"did not move ({moved_because}). The model correctly ignored an "
-            "irrelevant suppression."
-        )
+        cell, why = "correctly_ignored", (
+            "The suppressed hazard is NOT should-be-core and the recommendation did not "
+            "move: correctly ignored.")
 
     return {
         "moved": moved,
         "is_should_be_core": is_core,
         "cell": cell,
         "move_basis": move_basis,
-        "explanation": why,
+        "explanation": f"{why} (total_shift={total_shift:.2f}, cutoff={MOVE_CUTOFF}).",
     }
 
 
-# ════════════════════════════════════════════════════════════
-# Step 8 — compare core vs control
-# ════════════════════════════════════════════════════════════
-
+# ────────────────────────────────────────────────────────────
+# Step 8 — compare_to_control
+# ────────────────────────────────────────────────────────────
 
 def compare_to_control(core_run: dict, control_run: dict) -> dict:
-    """Does suppressing the core move recs MORE than suppressing the control?
+    """Does suppressing the real hazard move the output MORE than an irrelevant one?
 
-    Invariant: core-shift > control-shift -> discriminates True; equal -> False
-    (flagged). When there is no control run -> discriminates None (skipped, not a
-    failure; Fixed rule #7).
+    Invariant: core_total_shift > control_total_shift -> discriminates True; equal ->
+    flagged (False). No control run (rule #7: < 2 hazards) -> discriminates None
+    (skipped, not a failure).
+
+    B2: discrimination is computed on `content_shift` (mean of hazard+graph+recommendation),
+    NOT total_shift. Under coherent re-routing structural/semantic deltas are ~0 and would
+    dilute total_shift toward the control, masking a real core>control gap. `content_basis`
+    records which basis was used; the raw total_shifts are still reported for audit.
     """
     core_run = core_run or {}
-    core_signals = core_run.get("signals") or {}
-    core_total = float(core_signals.get("total_shift", 0.0) or 0.0)
-
+    core_sig = core_run.get("signals") or {}
+    core_shift = float(core_sig.get("content_shift", core_sig.get("total_shift", 0.0)) or 0.0)
+    core_total = float(core_sig.get("total_shift", 0.0) or 0.0)
     if not control_run:
-        return {
-            "core_total_shift": round(core_total, 4),
-            "control_total_shift": None,
-            "discriminates": None,
-        }
-
-    control_signals = control_run.get("signals") or {}
-    control_total = float(control_signals.get("total_shift", 0.0) or 0.0)
+        return {"core_total_shift": core_total, "control_total_shift": None,
+                "core_content_shift": core_shift, "control_content_shift": None,
+                "content_basis": True, "discriminates": None}
+    ctrl_sig = control_run.get("signals") or {}
+    control_shift = float(ctrl_sig.get("content_shift", ctrl_sig.get("total_shift", 0.0)) or 0.0)
+    control_total = float(ctrl_sig.get("total_shift", 0.0) or 0.0)
     return {
-        "core_total_shift": round(core_total, 4),
-        "control_total_shift": round(control_total, 4),
-        "discriminates": core_total > control_total,
+        "core_total_shift": core_total,
+        "control_total_shift": control_total,
+        "core_content_shift": core_shift,
+        "control_content_shift": control_shift,
+        "content_basis": True,
+        "discriminates": core_shift > control_shift,
     }
 
 
-# ════════════════════════════════════════════════════════════
-# Pipeline — compose steps 2-8 (step 0/1 done by the caller/UI)
-# ════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────
+# Pipeline — run_intervention (composes steps 1-8)
+# ────────────────────────────────────────────────────────────
 
-
-def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict:
-    """End-to-end counterfactual: spec -> do() -> post -> U-check -> shifts -> verdict,
-    plus the control arm and the discrimination check.
-
-    `selections` may carry:
-      - "candidates": a precomputed enumerate_candidates() result (else computed here)
-      - "intervention_type": explicit override (else auto by hazard_class)
-      - "modality": "language" (default) | "visual" | "joint"
-      - "core": an explicit candidate to suppress (else the should-be-core; else the
-        declared Graph-A core as a fallback when no GT)
-      - "control": an explicit control candidate (else the enumerated control)
-
-    Returns a JSON-serializable summary dict matching the contract.
-    """
+def _baseline_summary(baseline: dict) -> dict:
+    """Compact, JSON-serializable baseline summary for the run record (no image bytes, no
+    gt_graph content — the latter would leak the answer key into the output)."""
     baseline = baseline or {}
-    selections = selections or {}
-
-    cand_result = selections.get("candidates") or enumerate_candidates(baseline)
-    modality = selections.get("modality", "language")
-    itype = selections.get("intervention_type")
-
-    # Pick the core candidate to suppress, tracking WHY (R2): a GT-confirmed core, or
-    # a fallback to the model's DECLARED core (Graph A then B) when GT did not resolve.
-    core_candidate = selections.get("core")
-    core_context: dict[str, Any] = {}
-    if core_candidate is None:
-        if cand_result.get("should_be_core") is not None:
-            core_candidate = cand_result.get("should_be_core")
-        elif cand_result.get("declared_core_a") is not None:
-            core_candidate = cand_result.get("declared_core_a")
-            core_context = {"core_not_declared": True, "declared_core_source": "A"}
-        elif cand_result.get("declared_core_b") is not None:
-            core_candidate = cand_result.get("declared_core_b")
-            core_context = {"core_not_declared": True, "declared_core_source": "B"}
-
-    result: dict[str, Any] = {
-        "baseline": _baseline_summary(baseline, cand_result),
-        "spec": None,
-        "u_check": None,
-        "signals": None,
-        "verdict": None,
-        "control": None,
-        "discrimination": None,
-    }
-
-    if core_candidate is None:
-        # Nothing to suppress: degrade gracefully (rubric A4).
-        result["verdict"] = {
-            "moved": False,
-            "is_should_be_core": None,
-            "cell": "not_adjudicable",
-            "nothing_to_suppress": True,
-            "move_basis": {},
-            "explanation": "No hazard candidate available to suppress.",
-        }
-        return result
-
-    core_run = _run_one_arm(
-        baseline, core_candidate, itype, modality, vlm_fn, cand_result,
-        role="core", context=core_context,
-    )
-    result["spec"] = core_run["spec"]
-    result["u_check"] = core_run["u_check"]
-    result["signals"] = core_run["signals"]
-    result["verdict"] = core_run["verdict"]
-
-    # Control arm (skipped when no control).
-    control_candidate = selections.get("control") or cand_result.get("control")
-    if control_candidate is not None:
-        control_run = _run_one_arm(
-            baseline, control_candidate, itype, modality, vlm_fn, cand_result,
-            role="control", context={},
-        )
-        result["control"] = {
-            "spec": control_run["spec"],
-            "signals": control_run["signals"],
-            "verdict": control_run["verdict"],
-        }
-        result["discrimination"] = compare_to_control(core_run, control_run)
-    else:
-        result["discrimination"] = compare_to_control(core_run, {})
-
-    return result
-
-
-def _run_one_arm(
-    baseline: dict,
-    candidate: dict,
-    intervention_type: Optional[str],
-    modality: str,
-    vlm_fn: Callable,
-    cand_result: dict,
-    role: Optional[str] = None,
-    context: Optional[dict] = None,
-) -> dict:
-    """Run steps 2-7 for a single suppression candidate.
-
-    `role` ("core"|"control") is set by the caller (run_intervention), DECOUPLED from
-    is_should_be_core (R3): the core arm is role='core' even when it suppresses a
-    declared (non-GT) core. `context` carries R2 disambiguation
-    (core_not_declared / declared_core_source) into adjudicate.
-
-    B7: U-preservation actually GUARDS the causal claim. When the do() leaked U (the
-    model re-read the whole scene instead of holding it fixed), the pre/post comparison
-    is invalid, so we OVERRIDE the verdict to a void state (`cell='u_leaked'`,
-    `comparison_invalid=True`). B9/B2: on a void run we do NOT carry a `moved` claim up
-    (the OR-escape rec_shift value must not read as a finding above an invalid
-    comparison) — we null `moved` and stamp move_basis with `consumed: False`, keeping
-    the raw shifts only for audit. Now that U is on the canonical-label multiset (R1),
-    this override fires only on genuine label-multiset divergence, not id churn.
-    """
-    spec = build_intervention_spec(candidate, intervention_type, modality, role=role)
-    do = render_do_prompt(baseline, spec)
-    post = run_counterfactual(baseline.get("image_data_url"), do["prompt"], spec, vlm_fn)
-    u_check = check_u_preservation(baseline, post)
-    signals = compute_shifts(baseline, post, spec)
-    verdict = adjudicate_groundedness(spec, signals, cand_result, context=context)
-    if u_check.get("leaked"):
-        voided_basis = {
-            **(verdict.get("move_basis") or {}),
-            "moved": None,
-            "consumed": False,
-            "note": "computed but not consumed — U leaked",
-        }
-        verdict = {
-            "moved": None,  # B9/B2: no 'moved' claim above an invalid comparison
-            "is_should_be_core": verdict.get("is_should_be_core"),
-            "cell": "u_leaked",
-            "comparison_invalid": True,
-            "move_basis": voided_basis,
-            "explanation": (
-                "U leaked: canonical-label multiset overlap "
-                f"{u_check.get('object_overlap')} < cutoff {u_check.get('cutoff')} "
-                f"(raw_id_overlap {u_check.get('raw_id_overlap')}), so the scene "
-                "genuinely diverged rather than being held fixed. The counterfactual "
-                "comparison is invalid; verdict is VOID (the pre-leak cell would have "
-                f"been '{verdict.get('cell')}'). The measured shifts are retained for "
-                "audit but the 'moved' claim is not consumed."
-            ),
-        }
-    return {
-        "spec": spec,
-        "do_prompt": do,
-        "post": post,
-        "u_check": u_check,
-        "signals": signals,
-        "verdict": verdict,
-    }
-
-
-def _baseline_summary(baseline: dict, cand_result: dict) -> dict:
-    """Compact, JSON-serializable baseline context for the result (no image bytes)."""
     return {
         "run_id": baseline.get("run_id", ""),
         "image_filename": baseline.get("image_filename", ""),
         "hazard_level": baseline.get("hazard_level", 0),
         "trust": baseline.get("trust", {}),
         "has_gt": baseline.get("gt_graph") is not None,
-        "num_candidates": len(cand_result.get("candidates") or []),
-        "should_be_core": cand_result.get("should_be_core"),
-        "control": cand_result.get("control"),
-        "gt_core_unobserved": cand_result.get("gt_core_unobserved"),
+        "n_detected_objects": len(baseline.get("detected_objects") or []),
+        "n_recommendations": len(baseline.get("recommendations") or []),
+    }
+
+
+def _post_composition(post: dict) -> dict:
+    """C1 audit: the post's detected-object composition for the run record so a U-leak
+    verdict is FALSIFIABLE from the persisted artifact (reviewer can see whether a leak is
+    a genuine scene re-read vs benign relabeling). Carries the raw detected_objects plus
+    the canonical-label multiset (sorted, JSON-serializable)."""
+    post = post or {}
+    from collections import Counter
+    ms: Counter = Counter()
+    for o in post.get("detected_objects") or []:
+        fam = _canonical_label(o.get("label", ""))
+        if fam:
+            ms[fam] += 1
+    return {
+        "detected_objects": post.get("detected_objects") or [],
+        "label_multiset": dict(sorted(ms.items())),
+    }
+
+
+def _run_one(baseline: dict, candidate: dict, selections: dict, vlm_fn: Callable,
+             role: str = "core", core_basis: str | None = None) -> dict:
+    """Run steps 2-6 for a single candidate; return {spec, u_check, signals, post,
+    suppression_statement}. `role` is the arm tag, decoupled from is_should_be_core;
+    `core_basis` records the core arm's provenance (gt | declared_a | declared_b)."""
+    spec = build_intervention_spec(
+        candidate,
+        intervention_type=selections.get("intervention_type"),
+        modality=selections.get("modality", "language"),
+        role=role,
+        core_basis=core_basis,
+    )
+    rendered = render_do_prompt(baseline, spec)
+    post = run_counterfactual(baseline.get("image_data_url"), rendered["prompt"], spec, vlm_fn)
+    u_check = check_u_preservation(baseline, post, spec)
+    signals = compute_shifts(baseline, post, spec)
+    return {"spec": spec, "u_check": u_check, "signals": signals, "post": post,
+            "suppression_statement": rendered["suppression_statement"]}
+
+
+def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict:
+    """End-to-end counterfactual: enumerate -> pick target -> do() -> shifts -> verdict,
+    plus the control run and the discrimination check (steps 1-8).
+
+    `selections` may carry: target_object_id (else should_be_core, else declared core A,
+    else the top candidate), intervention_type (override), modality. Returns plain
+    JSON-serializable dicts throughout.
+
+    Verdict precedence (A7 — mutually exclusive by design, applied in this fixed order):
+      R4  gt_core_unobserved  : GT names a core the model never perceived. A perception
+                                miss is a BASELINE fact, independent of the counterfactual,
+                                so it OUTRANKS everything below; if U also leaks it is kept
+                                as a `u_leaked` annotation, not allowed to overwrite the cell.
+      R2  core_not_declared   : no GT at all, but a declared core ran (annotation on the
+                                not_adjudicable cell).
+      U-leak                  : voids an OTHERWISE-adjudicable 2x2 verdict (comparison
+                                invalid). It composes with R4/R2 (carries their diagnostic
+                                keys forward) rather than erasing them.
+    """
+    selections = selections or {}
+    enum = enumerate_candidates(baseline)
+    candidates = enum["candidates"]
+
+    # A4 (driver contract): `selections['candidates']` is NOT part of the contract.
+    # enumerate_candidates is the single source of truth and is always re-run here, so a
+    # caller-supplied candidates bundle is intentionally ignored. Record that it was unused
+    # rather than silently accepting it, so a caller does not assume the precomputed enum
+    # was reused.
+    ignored_selection_keys = [k for k in selections
+                              if k not in ("target_object_id", "intervention_type",
+                                           "modality", "candidates")]
+    candidates_arg_ignored = "candidates" in selections
+
+    # Target selection: explicit > GT-resolved should_be_core > declared core A > top.
+    # Track whether the core arm is a declared-but-not-GT fallback (R2).
+    target = None
+    declared_core_source: str | None = None
+    sel_oid = selections.get("target_object_id")
+    if sel_oid:
+        target = next((c for c in candidates if c["object_id"] == sel_oid), None)
+    if target is None:
+        if enum["should_be_core"] is not None:
+            target = enum["should_be_core"]
+        elif enum["declared_core_a"] is not None:
+            target = enum["declared_core_a"]
+            declared_core_source = "A"
+        elif enum["declared_core_b"] is not None:
+            target = enum["declared_core_b"]
+            declared_core_source = "B"
+        elif candidates:
+            target = candidates[0]
+
+    if target is None:
+        # Genuinely nothing to suppress (no candidate at all). Distinct from the
+        # declared-but-no-GT case (R2): this is the empty scene (A4).
+        return {
+            "baseline": _baseline_summary(baseline),
+            "spec": None,
+            "u_check": None,
+            "signals": None,
+            "verdict": {"cell": "not_adjudicable",
+                        "is_should_be_core": None,
+                        "nothing_to_suppress": True,
+                        "explanation": "No hazard candidates in the scene — nothing to suppress."},
+            "post_composition": None,
+            "control": None,
+            "discrimination": {"core_total_shift": None, "control_total_shift": None,
+                               "discriminates": None},
+            "candidates": enum,
+            "selection_notes": {
+                "candidates_arg_ignored": candidates_arg_ignored,
+                "ignored_selection_keys": ignored_selection_keys,
+            },
+        }
+
+    # The core arm always runs as role='core' (decoupled from the GT-truth flag, R3).
+    # core_basis records provenance on the SPEC so it survives the verdict-level overrides.
+    if enum["should_be_core"] is not None and declared_core_source is None and (
+            target is enum["should_be_core"]):
+        core_basis = "gt"
+    elif declared_core_source == "A":
+        core_basis = "declared_a"
+    elif declared_core_source == "B":
+        core_basis = "declared_b"
+    else:
+        core_basis = None
+    core = _run_one(baseline, target, selections, vlm_fn, role="core", core_basis=core_basis)
+    core_verdict = adjudicate_groundedness(core["spec"], core["signals"], enum)
+    u_leaked = bool(core["u_check"].get("leaked"))
+
+    # ── R4 (top precedence): GT names a core the model never co-referenced. A perception
+    # miss is a BASELINE fact, U-independent, so this cell stands EVEN WHEN U leaks; a U
+    # leak is recorded as an annotation, never allowed to overwrite the more fundamental
+    # finding (A4/B3/C4 — the headline must not be buried under a void).
+    if enum.get("gt_core_unobserved") is not None:
+        core_verdict = {
+            "moved": None if u_leaked else core_verdict.get("moved"),
+            "is_should_be_core": None,   # B3 tri-state: core status never determinable here
+            "cell": "gt_core_unobserved",
+            "gt_core_unobserved": enum["gt_core_unobserved"],
+            "move_basis": {**(core_verdict.get("move_basis") or {}),
+                           **({"moved": None, "consumed": False} if u_leaked else {})},
+            "explanation": (
+                "Ground truth names a core hazard "
+                f"({enum['gt_core_unobserved'].get('label','')} / "
+                f"{enum['gt_core_unobserved'].get('state','')}) that the model never "
+                "perceived, so groundedness cannot be adjudicated against it (perception "
+                "miss, not a reasoning verdict)."
+                + (" U also leaked on the suppression arm; the perception miss is reported "
+                   "regardless, with the leak noted." if u_leaked else "")
+            ),
+        }
+        if u_leaked:
+            core_verdict["u_leaked"] = True
+            core_verdict["object_overlap"] = core["u_check"].get("object_overlap")
+
+    # ── R2: no GT at all but a declared core ran. Annotate the not_adjudicable verdict so
+    # the declared movement is preserved and distinguished from nothing_to_suppress. This
+    # composes with a later U-leak void (the annotation is carried forward, not erased).
+    elif core_verdict.get("cell") == "not_adjudicable" and declared_core_source is not None:
+        core_verdict["core_not_declared"] = True
+        core_verdict["declared_core_source"] = declared_core_source
+        core_verdict["explanation"] = (
+            "No verified ground truth for this scene, so the should-be-core row is "
+            f"undetermined; the core arm ran on the model's DECLARED core (source "
+            f"{declared_core_source}). Movement is preserved for audit but not adjudicated."
+        )
+
+    # ── B7/B9: U leak VOIDS an OTHERWISE-ADJUDICABLE verdict (the 2x2 cells / plain
+    # not_adjudicable). R4's gt_core_unobserved already absorbed the leak above, so we skip
+    # it here. For everything else, override the cell to 'u_leaked', null the 'moved' claim
+    # AND move_basis.moved (B9 — no field may assert movement a void invalidated), mark
+    # move_basis not-consumed (raw shift retained for audit), and CARRY FORWARD the R2
+    # diagnostic keys so the void does not erase a declared-core / perception finding (A4).
+    if u_leaked and core_verdict.get("cell") != "gt_core_unobserved":
+        voided_basis = dict(core_verdict.get("move_basis") or {})
+        voided_basis["consumed"] = False
+        voided_basis["moved"] = None  # B9: do not retain a 'moved:true' under a void
+        new_verdict = {
+            "moved": None,
+            "is_should_be_core": core_verdict.get("is_should_be_core"),  # tri-state preserved
+            "cell": "u_leaked",
+            "comparison_invalid": True,
+            "move_basis": voided_basis,
+            "explanation": (
+                "U leaked: the post-suppression scene no longer matches the baseline "
+                f"entity composition (object_overlap={core['u_check'].get('object_overlap', 0):.2f} "
+                f"< {U_CUTOFF}). The counterfactual comparison is invalid, so no "
+                "groundedness verdict is drawn from it."
+            ),
+        }
+        # A4: preserve the declared-core / perception diagnostics under the void.
+        for k in ("core_not_declared", "declared_core_source"):
+            if k in core_verdict:
+                new_verdict[k] = core_verdict[k]
+        core_verdict = new_verdict
+
+    control_block = None
+    control_run = None
+    control_cand = enum.get("control")
+    control_is_placebo = False
+    if control_cand is None and enum.get("placebo_control") is not None:
+        # B6 / C1 fallback: no real-hazard control, so suppress a non-hazard (placebo) to
+        # still provide a discrimination baseline. role='control', tagged is_placebo.
+        control_cand = enum["placebo_control"]
+        control_is_placebo = True
+    if control_cand is not None:
+        # The control run uses its own auto-typed do(); it never inherits the core's
+        # explicit intervention_type override. role='control' (the control arm, R3).
+        ctrl_selections = {"modality": selections.get("modality", "language")}
+        control_run = _run_one(baseline, control_cand, ctrl_selections, vlm_fn, role="control")
+        control_verdict = adjudicate_groundedness(control_run["spec"], control_run["signals"], enum)
+        if control_run["u_check"].get("leaked"):
+            control_verdict = {
+                "moved": None, "cell": "u_leaked", "comparison_invalid": True,
+                "move_basis": {**(control_verdict.get("move_basis") or {}),
+                               "moved": None, "consumed": False},
+                "explanation": "U leaked on the control arm; comparison invalid.",
+            }
+        control_block = {
+            "spec": control_run["spec"],
+            "signals": control_run["signals"],
+            "u_check": control_run["u_check"],
+            "verdict": control_verdict,
+            "is_placebo": control_is_placebo,
+            # C1 audit: persist the control post composition too.
+            "post_composition": _post_composition(control_run["post"]),
+        }
+
+    discrimination = compare_to_control(
+        {"signals": core["signals"]},
+        {"signals": control_run["signals"]} if control_run else None,
+    )
+    discrimination["control_kind"] = (
+        ("placebo" if control_is_placebo else "hazard") if control_run else None
+    )
+
+    return {
+        "baseline": _baseline_summary(baseline),
+        "spec": core["spec"],
+        "u_check": core["u_check"],
+        "signals": core["signals"],
+        "verdict": core_verdict,
+        # C1 audit: persist the post's entity composition so a confound auditor can inspect
+        # WHAT (if anything) leaked — a U-leak verdict must be falsifiable from the artifact.
+        "post_composition": _post_composition(core["post"]),
+        "control": control_block,
+        "discrimination": discrimination,
+        "candidates": enum,
+        "selection_notes": {
+            "candidates_arg_ignored": candidates_arg_ignored,
+            "ignored_selection_keys": ignored_selection_keys,
+        },
     }
