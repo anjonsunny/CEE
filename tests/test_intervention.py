@@ -442,49 +442,150 @@ def test_run_counterfactual_calls_vlm_and_returns_light_post(tmp_path):
 # ---------------------------------------------------------------------------
 # step 5 — check_u_preservation
 # ---------------------------------------------------------------------------
-def _det(objs):
-    """objs = list of (object_id, label) -> detected_objects records."""
-    return {"detected_objects": [{"object_id": oid, "label": lab, "state": ""}
-                                 for oid, lab in objs]}
+def _det(objs, edges=None):
+    """objs = list of (object_id, label) or (object_id, label, state) -> detected_objects;
+    optional edges = list of (source, target[, effect[, via_state]]) -> graph_a edges."""
+    dobjs = []
+    for o in objs:
+        if len(o) == 3:
+            oid, lab, st = o
+        else:
+            oid, lab = o
+            st = ""
+        dobjs.append({"object_id": oid, "label": lab, "state": st})
+    out = {"detected_objects": dobjs}
+    if edges is not None:
+        e_recs = []
+        for e in edges:
+            src, tgt = e[0], e[1]
+            eff = e[2] if len(e) > 2 else "affects"
+            via = e[3] if len(e) > 3 else ""
+            e_recs.append({"source": src, "target": tgt, "effect": eff, "via_state": via})
+        out["graph_a"] = {"nodes": [], "edges": e_recs}
+    return out
 
 
-def test_u_preserved_when_objects_stable():
-    """R1: U is gated on the canonical LABEL multiset, not exact ids. RENAMED ids with
-    a stable label multiset (baseline person/person/chair vs post man/woman/seat — same
-    canonical families) must NOT leak; overlap high, leaked False. The raw exact-id
-    Jaccard is reported as a secondary diagnostic but does NOT drive `leaked`."""
-    baseline = _det([("person_1", "person"), ("person_2", "person"), ("chair_1", "chair")])
-    post = _det([("man_7", "man"), ("woman_9", "woman"), ("seat_3", "chair")])
-    u = intervention.check_u_preservation(baseline, post)
-    # man/woman canonicalize to person; chair/seat are the same class -> multiset stable.
-    assert u["object_overlap"] >= 0.7
+# B7 construct fix: the U gate is now driven by STATE-stability and TOPOLOGY-stability of
+# NON-suppressed entities (quantities the do()-prompt did NOT instruct), NOT the canonical
+# label multiset / id Jaccard (which EMBED-BASELINE forces the model to reproduce, making the
+# old gate tautological). object_overlap / raw_id_overlap survive only as secondary,
+# non-gating diagnostics. These tests lock the new construct.
+
+_FLOOD_SPEC = {"target": {"object_id": "flood_1", "state": "engulfing", "label": "water"},
+               "intervention_type": "edge_severance"}
+
+
+def test_u_preserved_when_states_and_topology_stable():
+    """Faithful hold-fixed: only the suppressed entity (flood_1) and its incident edge change;
+    every NON-suppressed state and every non-suppressed edge holds -> leaked False, both
+    stabilities 1.0. A grounded re-route must NOT be flagged as a leak."""
+    baseline = _det([("flood_1", "water", "engulfing"),
+                     ("person_1", "person", "standing"),
+                     ("car_1", "car", "parked")],
+                    edges=[("flood_1", "person_1"), ("car_1", "person_1")])
+    # flood_1 drained + its edge gone (the do()-coupled change); person_1/car_1 states held;
+    # the car_1->person_1 edge (both non-suppressed) preserved.
+    post = _det([("flood_1", "water", "drained"),
+                 ("person_1", "person", "standing"),
+                 ("car_1", "car", "parked")],
+                edges=[("car_1", "person_1")])
+    u = intervention.check_u_preservation(baseline, post, _FLOOD_SPEC)
+    assert u["state_stability"] == pytest.approx(1.0)
+    assert u["topology_stability"] == pytest.approx(1.0)
     assert u["leaked"] is False
     assert u["cutoff"] == pytest.approx(0.7)  # U_CUTOFF
-    # secondary diagnostic present, and it is the (low) raw-id Jaccard — NOT the gate.
-    assert "raw_id_overlap" in u
-    assert u["raw_id_overlap"] < 0.7  # ids were fully renamed
-    assert u["leaked"] is False       # ...yet not leaked, because labels held
 
 
-def test_u_leaked_when_label_multiset_diverges():
-    """R1: U LEAKS only when the canonical-label multiset genuinely diverges (objects
-    appear/disappear by class). baseline {water,person} vs post {tree,rock}: zero
-    shared label families -> overlap 0 -> leaked True."""
-    baseline = _det([("flood_1", "water"), ("person_1", "person")])
-    post = _det([("tree_1", "tree"), ("rock_1", "rock")])
-    u = intervention.check_u_preservation(baseline, post)
-    assert u["object_overlap"] < 0.7
+def test_u_leaked_when_nonsuppressed_state_flips():
+    """B7: ids+labels all reused (raw_id_overlap 1.0, object_overlap 1.0) but a NON-suppressed
+    entity's STATE is silently re-imagined (person_1 standing -> fleeing) -> leaked True. The
+    old label-multiset gate would have passed this by construction."""
+    baseline = _det([("flood_1", "water", "engulfing"),
+                     ("person_1", "person", "standing"),
+                     ("car_1", "car", "parked")])
+    post = _det([("flood_1", "water", "drained"),
+                 ("person_1", "person", "fleeing"),
+                 ("car_1", "car", "submerged")])
+    u = intervention.check_u_preservation(baseline, post, _FLOOD_SPEC)
+    assert u["raw_id_overlap"] == pytest.approx(1.0)   # reuse compliance held
+    assert u["object_overlap"] == pytest.approx(1.0)   # label multiset held
+    assert u["state_stability"] < 0.7                  # ...but states drifted
     assert u["leaked"] is True
 
 
-def test_u_identical_ids_and_labels_not_leaked():
-    """Sanity: identical ids AND labels -> overlap 1.0, leaked False, raw_id_overlap 1.0."""
-    baseline = _det([("flood_1", "water"), ("person_1", "person")])
-    post = _det([("flood_1", "water"), ("person_1", "person")])
-    u = intervention.check_u_preservation(baseline, post)
-    assert u["object_overlap"] == pytest.approx(1.0)
+def test_u_leaked_when_nonsuppressed_topology_rewired():
+    """B7: ids+labels+states all reused, but TOPOLOGY among non-suppressed nodes is rewired
+    (a new car_1->house_1 edge appears + the original drops) -> leaked True. Edges touching
+    the suppressed flood_1 are excluded, so this leak is purely non-suppressed re-wiring."""
+    baseline = _det([("flood_1", "water", "engulfing"),
+                     ("person_1", "person", "standing"),
+                     ("car_1", "car", "parked"),
+                     ("house_1", "house", "intact")],
+                    edges=[("flood_1", "person_1"), ("car_1", "person_1")])
+    post = _det([("flood_1", "water", "drained"),
+                 ("person_1", "person", "standing"),
+                 ("car_1", "car", "parked"),
+                 ("house_1", "house", "intact")],
+                edges=[("car_1", "house_1")])  # car_1->person_1 dropped, car_1->house_1 added
+    u = intervention.check_u_preservation(baseline, post, _FLOOD_SPEC)
+    assert u["state_stability"] == pytest.approx(1.0)  # states held
+    assert u["topology_stability"] < 0.7               # ...but non-suppressed edges rewired
+    assert u["leaked"] is True
+
+
+def test_u_grounded_reroute_not_flagged():
+    """Positive lock: only the suppressed hazard's own state/edges change (flood_1 drained,
+    its incident edge dropped) and the recommendation/graph re-route happens ONLY along
+    suppressed-coupled edges; every non-suppressed state and edge holds -> leaked False.
+    Proves a grounded re-route is not mislabeled as a U leak."""
+    baseline = _det([("flood_1", "water", "engulfing"),
+                     ("person_1", "person", "standing"),
+                     ("car_1", "car", "parked")],
+                    edges=[("flood_1", "person_1", "drowns"), ("flood_1", "car_1", "floats")])
+    post = _det([("flood_1", "water", "drained"),
+                 ("person_1", "person", "standing"),
+                 ("car_1", "car", "parked")],
+                edges=[])  # all edges were flood_1-incident -> all legitimately drop
+    u = intervention.check_u_preservation(baseline, post, _FLOOD_SPEC)
+    assert u["state_stability"] == pytest.approx(1.0)
+    assert u["topology_stability"] == pytest.approx(1.0)  # vacuous: no non-suppressed edges
     assert u["leaked"] is False
+
+
+def test_u_secondary_diagnostics_present_but_nongating():
+    """B7: object_overlap and raw_id_overlap remain as secondary keys but do NOT drive
+    `leaked` — a post can have perfect id/label overlap yet leak on state."""
+    baseline = _det([("flood_1", "water", "engulfing"), ("person_1", "person", "standing")])
+    post = _det([("flood_1", "water", "drained"), ("person_1", "person", "drowning")])
+    u = intervention.check_u_preservation(baseline, post, _FLOOD_SPEC)
+    assert "object_overlap" in u and "raw_id_overlap" in u
     assert u["raw_id_overlap"] == pytest.approx(1.0)
+    assert u["leaked"] is True  # gated on state, not the secondary overlaps
+
+
+def test_u_target_mitigation_family_removal_not_leaked():
+    """B8 carried forward: a target_mitigation do() that legitimately removes the suppressed
+    person (one person-family unit vanishes) while every OTHER state holds -> leaked False."""
+    baseline = _det([("person_1", "person", "trapped"),
+                     ("car_1", "car", "parked"),
+                     ("house_1", "house", "intact")])
+    post = _det([("car_1", "car", "parked"), ("house_1", "house", "intact")])  # person_1 moved to safety
+    spec = {"target": {"object_id": "person_1", "state": "trapped", "label": "person"},
+            "intervention_type": "target_mitigation"}
+    u = intervention.check_u_preservation(baseline, post, spec)
+    assert u["leaked"] is False  # the removed entity is the suppressed target, not a leak
+
+
+def test_u_vacuous_stable_when_nothing_nonsuppressed():
+    """A4: a sparse scene with only the suppressed entity (no non-suppressed states/edges)
+    cannot leak what it never had -> both stabilities 1.0, leaked False."""
+    baseline = _det([("flood_1", "water", "engulfing")])
+    post = _det([("flood_1", "water", "drained")])
+    u = intervention.check_u_preservation(baseline, post, _FLOOD_SPEC)
+    assert u["n_nonsuppressed_states"] == 0
+    assert u["state_stability"] == pytest.approx(1.0)
+    assert u["topology_stability"] == pytest.approx(1.0)
+    assert u["leaked"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1036,9 +1137,10 @@ def test_target_mitigation_does_not_self_leak_u():
     spec = {"intervention_type": "target_mitigation",
             "target": {"object_id": "person_1", "label": "person"}}
     u = intervention.check_u_preservation(base, post, spec)
-    assert u["leaked"] is False
-    assert u["object_overlap"] == pytest.approx(1.0)
-    # Control: WITHOUT the spec exception the same removal WOULD read as a leak.
+    assert u["leaked"] is False  # suppressed person excluded; chair/table states held
+    assert u["state_stability"] == pytest.approx(1.0)
+    # Control: WITHOUT the spec exception the removed person is NOT excluded, so it reads as a
+    # non-suppressed entity that vanished -> state_stability 2/3 < 0.7 -> leaked True.
     u_no_spec = intervention.check_u_preservation(base, post)
     assert u_no_spec["leaked"] is True
 
@@ -1194,6 +1296,9 @@ def test_run_output_includes_post_composition(tmp_path):
     assert pc is not None
     assert pc["detected_objects"] == raw_post["detected_objects"]
     assert pc["label_multiset"] == {"water": 1}
+    # C1 (B7 redesign): the post graph_a must ALSO be persisted so a TOPOLOGY-stability leak
+    # is falsifiable from the saved artifact (the U gate now reads graph edges, not just labels).
+    assert pc["graph_a"] == raw_post["causal_graph"]
 
 
 # ---------------------------------------------------------------------------
@@ -1888,18 +1993,26 @@ def test_discrimination_not_a_grounding_signal_on_gt_core_unobserved(tmp_path):
 # ---------------------------------------------------------------------------
 # B7 (refiner) — u_compliance_only flags a verbatim echo with no falsifiable do().
 # ---------------------------------------------------------------------------
-def test_u_compliance_only_flag_when_verbatim_echo_and_do_not_checked():
-    """B7 (refiner med): under EMBED-BASELINE a raw_id_overlap of 1.0 (verbatim id echo) with
-    a do()-applied reason of 'not_checked' is a COMPLIANCE indicator, not independent leak
-    verification. _stamp_u_compliance_only must set u_compliance_only=True so overlap==1.0 is
-    not read as 'U independently verified held'."""
+def test_u_compliance_only_flag_when_verbatim_echo():
+    """B7/B9 (refiner): after the U-gate redesign, raw_id_overlap / object_overlap are
+    SECONDARY reuse-compliance diagnostics only (the real gate is state/topology). Under
+    EMBED-BASELINE the embed forces raw_id_overlap == 1.0 on EVERY compliant arm, so the
+    compliance stamp must fire whenever raw_id_overlap == 1.0, REGARDLESS of the do() reason
+    (including source_removal) — no live arm may present the secondary id-overlap as an
+    independent U hold."""
+    # 'not_checked' arm: id echo -> compliance-only True.
     u_check = {"object_overlap": 1.0, "leaked": False, "cutoff": 0.7, "raw_id_overlap": 1.0}
     intervention._stamp_u_compliance_only(u_check, {"applied": True, "reason": "not_checked"})
     assert u_check["u_compliance_only"] is True
-    # When the do() IS independently checked (e.g. source_removed), the flag is False.
+    # source_removal arm (push_34): id echo STILL stamps compliance-only True now (the old
+    # narrow trigger left this False and presented id-overlap=1.0 as a clean hold).
     u_check2 = {"object_overlap": 1.0, "leaked": False, "cutoff": 0.7, "raw_id_overlap": 1.0}
     intervention._stamp_u_compliance_only(u_check2, {"applied": True, "reason": "source_removed"})
-    assert u_check2["u_compliance_only"] is False
+    assert u_check2["u_compliance_only"] is True
+    # When ids actually churned (raw_id_overlap < 1.0), it is NOT a pure echo -> flag False.
+    u_check3 = {"object_overlap": 0.8, "leaked": False, "cutoff": 0.7, "raw_id_overlap": 0.5}
+    intervention._stamp_u_compliance_only(u_check3, {"applied": True, "reason": "source_removed"})
+    assert u_check3["u_compliance_only"] is False
 
 
 # ---------------------------------------------------------------------------

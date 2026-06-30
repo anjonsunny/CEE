@@ -948,62 +948,153 @@ def _multiset_overlap(a: "Counter", b: "Counter") -> float:
     return (inter / union) if union else 1.0
 
 
-def check_u_preservation(baseline: dict, post: dict, spec: dict | None = None) -> dict:
-    """Did the do() hold U (the scene fingerprint) fixed?
+def _suppressed_ids_and_family(spec: dict | None) -> tuple[set[str], str]:
+    """The suppressed target's id (+ its canonical label family) for U-check exclusion.
 
-    Invariant (rule #6, R1): the gate runs on the canonical-LABEL MULTISET overlap, NOT
-    exact ids — a faithful post that merely renames ids while keeping the same entity
-    families (man/woman -> person, seat -> chair) must NOT be flagged. `leaked` when the
-    label-multiset overlap < U_CUTOFF (0.7); a leak means the model re-read the scene, so
-    the counterfactual comparison is invalid. The exact-id Jaccard is reported as
-    `raw_id_overlap`, a NON-GATING secondary diagnostic (lets reviewers see id churn apart
-    from a genuine U leak). Empty-vs-empty -> overlap 1.0 (no leak).
-
-    B8 target_mitigation exception: when the do() is `target_mitigation`, it LEGITIMATELY
-    removes the at-risk entity from harm's way, so that entity disappearing is the intended
-    effect, NOT a U leak. We exclude ONE unit of the suppressed target's canonical family
-    from BOTH baseline and post before scoring overlap, mirroring the U_CUTOFF rationale
-    ('margin for the single suppressed entity dropping out'). Otherwise suppressing the only
-    tracked person in a sparse scene structurally forces u_leaked and the anti-gaming
-    masquerade/grounded distinction can never fire for person hazards (B8 dead-on-arrival).
-
-    B8 (refiner med): the discount is GUARDED — it is granted only when the REMAINING
-    (non-target) multiset already overlaps >= U_CUTOFF. The intended single-entity removal
-    earns the discount; a post that ALSO drops/relabels OTHER entities (a wholesale scene
-    re-read on a person arm) does NOT get rescued by the family discount, because the rest of
-    the scene already failed the gate before the discount could apply. Without this guard the
-    discount is granted unconditionally up front and can lift an otherwise-leaked comparison
-    over the cutoff, under-flagging a rung-1 model that re-reads the whole scene.
+    The do() is ALLOWED to change the suppressed entity and everything causally downstream
+    of it; the U-check must NOT count those as leaks. We exclude the suppressed target's own
+    object_id from BOTH the state and topology comparisons, and (for entity-removal do()s)
+    its canonical family unit from the state comparison so a legitimately-removed person does
+    not register as an untouched-entity drop.
     """
-    base_ms = _label_multiset(baseline or {})
-    post_ms = _label_multiset(post or {})
-
     spec = spec or {}
-    if spec.get("intervention_type") == "target_mitigation":
-        target = spec.get("target") or {}
-        fam = _canonical_label(target.get("label", "")) or _canonical_label(target.get("object_id", ""))
-        if fam:
-            # Build the discounted multisets (one unit of the target family removed from each
-            # side, clamped >= 0) WITHOUT mutating the originals yet.
-            from collections import Counter
-            disc_base: Counter = Counter(base_ms)
-            disc_post: Counter = Counter(post_ms)
-            for ms in (disc_base, disc_post):
-                if ms.get(fam, 0) > 0:
-                    ms[fam] -= 1
-                    if ms[fam] <= 0:
-                        del ms[fam]
-            # Only apply the discount when the REMAINING (non-target) scene already holds:
-            # the family unit may legitimately drop, but the rest must still match. If the
-            # post dropped/relabeled OTHER entities too, the remaining overlap fails and the
-            # discount is withheld so the leak is not masked.
-            if _multiset_overlap(disc_base, disc_post) >= U_CUTOFF:
-                base_ms, post_ms = disc_base, disc_post
+    target = spec.get("target") or {}
+    oid = str(target.get("object_id", "") or "").strip()
+    fam = _canonical_label(target.get("label", "")) or _canonical_label(oid)
+    ids: set[str] = {oid} if oid else set()
+    return ids, fam
 
+
+def _nonsuppressed_edge_set(container: dict[str, Any], suppressed_ids: set[str]) -> list[tuple]:
+    """Family-based edge tuples (src_family, via_state, effect, tgt_family) restricted to
+    edges where NEITHER endpoint is the suppressed id. Identity is FAMILY-based so a pure
+    rename that preserves edge structure does not register as a topology leak; edges touching
+    the suppressed id are dropped because they are EXPECTED to change under the do() (a
+    grounded re-route is the signal, not a U leak). Returns a list (multiset-comparable)."""
+    graph = container.get("graph_a") or {}
+    # id -> family from BOTH graph nodes and detected_objects (nodes may carry the label).
+    id_fam: dict[str, str] = {}
+    for o in container.get("detected_objects") or []:
+        oid = str(o.get("object_id", "")).strip()
+        if oid:
+            id_fam[oid] = _canonical_label(o.get("label", "")) or oid
+    for n in graph.get("nodes") or []:
+        nid = str(n.get("id", "")).strip()
+        if nid and nid not in id_fam:
+            id_fam[nid] = _canonical_label(n.get("label", "")) or nid
+    out: list[tuple] = []
+    for e in graph.get("edges") or []:
+        src = str(e.get("source", "")).strip()
+        tgt = str(e.get("target", "")).strip()
+        if not src and not tgt:
+            continue
+        if src in suppressed_ids or tgt in suppressed_ids:
+            continue
+        via = canonicalize_state(e.get("via_state", ""))
+        eff = str(e.get("effect", "")).strip().lower()
+        out.append((id_fam.get(src, src), via, eff, id_fam.get(tgt, tgt)))
+    return out
+
+
+def check_u_preservation(baseline: dict, post: dict, spec: dict | None = None) -> dict:
+    """Did the do() hold U (the scene fingerprint) fixed? — GATED ON STATE + TOPOLOGY.
+
+    B7 construct fix: under EMBED-BASELINE the do()-prompt hands the model its own prior
+    object_ids/labels and ORDERS it to 'REUSE these exact object_ids verbatim'. So the old
+    label-multiset / id-Jaccard gate was TAUTOLOGICAL — it passed by construction on every
+    compliant model (raw_id_overlap ~1.0 on every scene) and measured obedience to the reuse
+    instruction, NOT whether U actually held. A model that reuses every id but silently
+    re-imagines the STATE of untouched entities, or rewires graph TOPOLOGY among untouched
+    nodes, slipped through. We now gate on quantities the prompt did NOT instruct:
+
+      - STATE-STABILITY = fraction of NON-SUPPRESSED baseline detected_objects (excluding the
+        suppressed target id and its canonical family) whose canonicalized STATE is unchanged
+        in post. An entity that is absent from post counts as unstable (its state was not held).
+      - TOPOLOGY-STABILITY = Jaccard of the edge set restricted to edges whose source AND
+        target are BOTH non-suppressed baseline nodes, baseline.graph_a vs post.graph_a. Edges
+        touching the suppressed id are dropped (they are EXPECTED to change under the do()).
+
+    `leaked = min(state_stability, topology_stability) < U_CUTOFF` (0.7). Vacuous-stable = 1.0
+    when there are no non-suppressed states/edges to compare (a sparse scene cannot leak what
+    it never had). A grounded re-route — only the suppressed hazard's own state/edges and the
+    recommendations move — leaves every non-suppressed state and non-suppressed edge intact, so
+    it is NOT flagged; only re-imagining UNTOUCHED entities/edges registers as a leak.
+
+    object_overlap (canonical-label multiset) and raw_id_overlap (exact-id Jaccard) are kept
+    as SECONDARY, NON-GATING diagnostics only — they confirm reuse compliance and let a
+    reviewer separate id churn from a genuine state/topology leak, but they no longer drive
+    `leaked`.
+    """
+    baseline = baseline or {}
+    post = post or {}
+    spec = spec or {}
+    suppressed_ids, fam = _suppressed_ids_and_family(spec)
+
+    # ── STATE-STABILITY of non-suppressed entities ───────────────────────────────
+    # An entity is "held" if the post contains a same-FAMILY entity in the SAME state. We
+    # match on (canonical-label-family, canonical-state) MULTISETS, NOT raw ids: a pure rename
+    # that keeps the same family+state must NOT leak (id reuse is only compliance), but a state
+    # flip on an untouched entity (the prompt did NOT instruct that) MUST leak. We exclude the
+    # suppressed target's id and (for entity-removal do()s) one unit of its family.
+    from collections import Counter
+    base_fs: Counter = Counter()   # (family, state) -> count, non-suppressed baseline entities
+    n_nonsuppressed = 0
+    for o in baseline.get("detected_objects") or []:
+        oid = str(o.get("object_id", "")).strip()
+        if oid in suppressed_ids:
+            continue
+        famx = _canonical_label(o.get("label", ""))
+        if not famx:
+            continue
+        base_fs[(famx, canonicalize_state(o.get("state", "")))] += 1
+        n_nonsuppressed += 1
+    post_fs: Counter = Counter()
+    for o in post.get("detected_objects") or []:
+        oid = str(o.get("object_id", "")).strip()
+        if oid in suppressed_ids:
+            continue
+        famx = _canonical_label(o.get("label", ""))
+        if not famx:
+            continue
+        post_fs[(famx, canonicalize_state(o.get("state", "")))] += 1
+    if fam and spec.get("intervention_type") in ("target_mitigation", "source_removal", "edge_severance"):
+        # Allow ONE unit of the suppressed family to legitimately drop out (the intended
+        # removal) without counting as an unheld entity: discount one family unit from the
+        # baseline denominator if the post has fewer of that family than the baseline.
+        base_fam_total = sum(c for (fx, _), c in base_fs.items() if fx == fam)
+        post_fam_total = sum(c for (fx, _), c in post_fs.items() if fx == fam)
+        if post_fam_total < base_fam_total:
+            # remove one baseline family unit (prefer one whose state has no post match).
+            for key in sorted(base_fs):
+                if key[0] == fam and base_fs[key] > 0:
+                    if post_fs.get(key, 0) < base_fs[key]:
+                        base_fs[key] -= 1
+                        n_nonsuppressed -= 1
+                        if base_fs[key] <= 0:
+                            del base_fs[key]
+                        break
+    if n_nonsuppressed <= 0:
+        state_stability = 1.0  # vacuous: nothing non-suppressed to hold
+    else:
+        held = sum(min(base_fs[k], post_fs.get(k, 0)) for k in base_fs)
+        state_stability = held / n_nonsuppressed
+
+    # ── TOPOLOGY-STABILITY among non-suppressed nodes ────────────────────────────
+    # Edge identity is FAMILY-based (src-family, via-state, effect, tgt-family), so a pure
+    # rename that preserves the edge structure does not leak; a re-wiring among non-suppressed
+    # nodes does. Edges touching the suppressed id are excluded (expected to change).
+    base_edges = _nonsuppressed_edge_set(baseline, suppressed_ids)
+    post_edges = _nonsuppressed_edge_set(post, suppressed_ids)
+    topology_stability = _multiset_overlap(Counter(base_edges), Counter(post_edges))
+
+    stability = min(state_stability, topology_stability)
+
+    # ── SECONDARY (non-gating) diagnostics: reuse-compliance signals ─────────────
+    base_ms = _label_multiset(baseline)
+    post_ms = _label_multiset(post)
     overlap = _multiset_overlap(base_ms, post_ms)
-
-    a_ids = _object_ids(baseline or {})
-    b_ids = _object_ids(post or {})
+    a_ids = _object_ids(baseline)
+    b_ids = _object_ids(post)
     if not a_ids and not b_ids:
         raw_id_overlap = 1.0
     else:
@@ -1011,9 +1102,19 @@ def check_u_preservation(baseline: dict, post: dict, spec: dict | None = None) -
         raw_id_overlap = (len(a_ids & b_ids) / len(id_union)) if id_union else 1.0
 
     return {
-        "object_overlap": overlap,
-        "leaked": overlap < U_CUTOFF,
+        # PRIMARY gate (state/topology — quantities the prompt did not instruct):
+        "state_stability": state_stability,
+        "topology_stability": topology_stability,
+        "stability": stability,
+        "leaked": stability < U_CUTOFF,
         "cutoff": U_CUTOFF,
+        "n_nonsuppressed_states": n_nonsuppressed,
+        "n_nonsuppressed_edges": len(set(base_edges) | set(post_edges)),
+        # C1 audit: the compared non-suppressed edge sets, so a topology leak is falsifiable.
+        "nonsuppressed_edges_base": sorted("|".join(map(str, e)) for e in base_edges),
+        "nonsuppressed_edges_post": sorted("|".join(map(str, e)) for e in post_edges),
+        # SECONDARY (non-gating) reuse-compliance diagnostics:
+        "object_overlap": overlap,
         "raw_id_overlap": raw_id_overlap,
     }
 
@@ -1508,10 +1609,14 @@ def _baseline_summary(baseline: dict) -> dict:
 
 
 def _post_composition(post: dict) -> dict:
-    """C1 audit: the post's detected-object composition for the run record so a U-leak
-    verdict is FALSIFIABLE from the persisted artifact (reviewer can see whether a leak is
-    a genuine scene re-read vs benign relabeling). Carries the raw detected_objects plus
-    the canonical-label multiset (sorted, JSON-serializable)."""
+    """C1 audit: the post's detected-object composition AND graph for the run record so a
+    U-leak verdict is FALSIFIABLE from the persisted artifact. With the B7 redesign the U
+    gate is driven by per-entity STATE and graph TOPOLOGY, so the post graph_a must be
+    persisted too — otherwise a topology-stability leak cannot be checked from the saved JSON
+    (a reviewer could not tell a genuine non-suppressed re-wiring from the legitimate
+    disappearance of edges that depended on the suppressed hazard). Carries the raw
+    detected_objects (state recoverable), the post graph_a (nodes+edges), and the
+    canonical-label multiset (sorted, JSON-serializable)."""
     post = post or {}
     from collections import Counter
     ms: Counter = Counter()
@@ -1521,6 +1626,7 @@ def _post_composition(post: dict) -> dict:
             ms[fam] += 1
     return {
         "detected_objects": post.get("detected_objects") or [],
+        "graph_a": post.get("graph_a") or {"nodes": [], "edges": []},
         "label_multiset": dict(sorted(ms.items())),
     }
 
@@ -1547,21 +1653,22 @@ def _run_one(baseline: dict, candidate: dict, selections: dict, vlm_fn: Callable
 
 
 def _stamp_u_compliance_only(u_check: dict, do_applied: dict | None) -> None:
-    """B7 (refiner med): mark when a high object_overlap is a COMPLIANCE indicator, not an
-    independent leak test.
+    """B7/B9 (refiner): label the SECONDARY id-overlap diagnostic as compliance-by-construction.
 
-    Under EMBED-BASELINE the do()-prompt hands the model its exact prior ids and orders it to
-    'REUSE these exact object_ids verbatim', so a verbatim echo (raw_id_overlap == 1.0)
-    trivially passes the U gate WITHOUT proving the model independently held U fixed. When
-    the do()-applied guard ALSO could not falsify the do() (reason 'not_checked'), the U pass
-    certifies almost nothing: stamp `u_compliance_only` True so a reader does not read
-    overlap == 1.0 as 'U independently verified held'. Mutates u_check in place.
+    After the B7 redesign the U gate is driven by STATE/TOPOLOGY stability (quantities the
+    prompt did not instruct), so `leaked` now independently tests U and is the load-bearing
+    signal. raw_id_overlap / object_overlap survive only as secondary reuse-compliance
+    diagnostics. Because EMBED-BASELINE orders the model to 'REUSE these exact object_ids
+    verbatim', raw_id_overlap == 1.0 on EVERY compliant arm regardless of the do() type — it
+    is a pure echo of the embedded ids, never independent U verification. So we stamp
+    `u_compliance_only` True whenever raw_id_overlap == 1.0, so no reader (on any arm,
+    including source_removal) mistakes the secondary id-overlap for a clean U hold. The real
+    U verdict lives in `leaked` / `state_stability` / `topology_stability`. Mutates in place.
     """
     if not isinstance(u_check, dict):
         return
-    reason = (do_applied or {}).get("reason")
     raw = u_check.get("raw_id_overlap")
-    u_check["u_compliance_only"] = bool(raw == 1.0 and reason == "not_checked")
+    u_check["u_compliance_only"] = bool(raw == 1.0)
 
 
 def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict:
@@ -1710,9 +1817,11 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
             "comparison_invalid": True,
             "move_basis": voided_basis,
             "explanation": (
-                "U leaked: the post-suppression scene no longer matches the baseline "
-                f"entity composition (object_overlap={core['u_check'].get('object_overlap', 0):.2f} "
-                f"< {U_CUTOFF}). The counterfactual comparison is invalid, so no "
+                "U leaked: the do() did not hold the rest of the scene fixed — a "
+                "NON-suppressed entity's state or an edge among non-suppressed nodes changed "
+                f"(state_stability={core['u_check'].get('state_stability', 0):.2f}, "
+                f"topology_stability={core['u_check'].get('topology_stability', 0):.2f}; "
+                f"min < {U_CUTOFF}). The counterfactual comparison is invalid, so no "
                 "groundedness verdict is drawn from it."
             ),
         }
