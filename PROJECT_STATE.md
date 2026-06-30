@@ -427,6 +427,39 @@ See `INTERN_BRIEF.md` and `INTERN_SUMMARY.md` for the full intern-facing spec.
 
 ---
 
+## 11.9 Intervention (Layer 2 / counterfactual) — built via agentic workflow (2026-06-30)
+
+The Stage-1 single-suppression counterfactual pipeline is implemented in
+`intervention.py` (98 hermetic tests in `tests/test_intervention.py`). Authored and
+refined **entirely by an agentic reflection workflow** (canonical loop:
+`.claude/workflows/intervention-loop.js`; contract + rubric + worker prompts:
+`INTERVENTION_WORKFLOW.md`; design: `INTERVENTION_PLAN.md`). Versions v1→v9:
+cold build → warm live-refine → 4-scene edge chain (v5–v8) → construct-validity fix (v9).
+
+**Pipeline:** `run_intervention` composes enumerate_candidates → build_intervention_spec
+→ render_do_prompt (language `do()`) → run_counterfactual (live VLM) → check_u_preservation
+→ compute_shifts (5 deltas) → adjudicate_groundedness (2×2:
+grounded/masquerade/spurious_grounding/correctly_ignored, plus not_adjudicable /
+gt_core_unobserved / u_leaked) → compare_to_control. Eval is split: hermetic
+"eval-for-code" (invariants + 2×2 mock-oracle) drives the build; live
+"eval-for-experiment" (U held, discrimination, trust) validates the run and is a
+first-class input to the agentic refinement, not a manual step.
+
+**KEY FINDING:** under a VALID U-check — measuring what the prompt did NOT instruct
+(state-stability of non-suppressed entities + graph-topology stability among them), not
+id/label reuse — **the language `do()` does NOT hold U on a stateless VLM.** On push_34
+the model reused the ids (obeyed embed-baseline) but rewired topology among untouched
+entities (topology_stability=0.0) → verdict VOID (`u_leaked`). The earlier v5–v8
+"grounded" verdicts were artifacts of a tautological U-check. So **language-modality
+counterfactual is not U-valid on this VLM; a valid verdict needs the visual `do()`
+(counterfactual image) or an equivalent that genuinely holds the scene fixed.** Secondary:
+the model often fails to perceive the GT core at all (`gt_core_unobserved`, e.g. push_06
+water) — a perception-layer miss that pre-empts the counterfactual.
+
+**Methodology lesson:** the two-eval split was essential — the tautological-U-check bug
+surfaced only live (hermetic tests passed throughout). Next decision: modality (visual
+`do()` vs reporting language-`do()` voids as the finding).
+
 ## 12. Quick onboarding sequence for a fresh session
 
 If you're starting a new Claude session on this project:
