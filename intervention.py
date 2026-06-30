@@ -325,6 +325,24 @@ def _outgoing_edge_count_adapter(graph: dict[str, Any]) -> dict[tuple[str, str],
     return counts
 
 
+def _hazard_in_degree(graph: dict[str, Any]) -> dict[str, int]:
+    """B4: count, per object_id, how many edges point AT it FROM a different node. A node
+    with in_degree 0 is a ROOT of the propagation (no other hazard feeds into it): the
+    originating source of the cascade, not a downstream fan-out victim. Used as a centrality
+    tiebreak so rank(GT) prefers the cascade origin over a high-fan-out node that merely has
+    the most outgoing edges (the 'merely most-edges' failure B4 warns against).
+    Self-edges are ignored (a node does not make itself non-root).
+    """
+    indeg: dict[str, int] = {}
+    for e in graph.get("edges") or []:
+        src = str(e.get("source", "")).strip()
+        tgt = str(e.get("target", "")).strip()
+        if not tgt or tgt == src:
+            continue
+        indeg[tgt] = indeg.get(tgt, 0) + 1
+    return indeg
+
+
 def _candidates_from_graph(graph: dict[str, Any],
                            use_intervention_candidates: bool,
                            extra_observed_ids: set[str] | None = None,
@@ -371,6 +389,13 @@ def _candidates_from_graph(graph: dict[str, Any],
 
     raw: list[tuple[str, str, int]] = []  # (object_id, state, outgoing_edge_count)
     phantoms: list[dict[str, Any]] = []   # B6: declared candidate ids with no entity anchor
+    # B4: in the adapter (B/GT) path, prefer the cascade ROOT (in_degree 0) over a high-
+    # fan-out downstream node. `use_root_preference` is False on the A path, which must
+    # mirror main.pick_suppression_framework EXACTLY (outgoing_edge_count -> acuteness ->
+    # alpha) and reads the model-supplied intervention_candidates.
+    use_root_preference = not (use_intervention_candidates
+                               and graph.get("intervention_candidates") is not None)
+    indeg = _hazard_in_degree(graph) if use_root_preference else {}
     if use_intervention_candidates and (graph.get("intervention_candidates") is not None):
         for c in graph.get("intervention_candidates") or []:
             tid = str(c.get("threat", "")).strip()
@@ -392,7 +417,16 @@ def _candidates_from_graph(graph: dict[str, Any],
             if tid:
                 raw.append((tid, st, adapter.get((tid, st), 0)))
 
-    ranked = sorted(raw, key=lambda t: (-(t[2]), -acuteness(t[1]), t[0], t[1]))
+    # B4: root-first ON the adapter path. A node with in_degree 0 (no other hazard edges
+    # INTO it) is the origin of the propagation; it ranks above any downstream fan-out node
+    # regardless of that node's outgoing-edge count. `is_root` sorts first (0 before 1),
+    # then the original rule (outgoing_edge_count desc, acuteness desc, alpha) breaks ties
+    # WITHIN the root group and within the non-root group. On the A path use_root_preference
+    # is False, so is_root is uniformly 0 and the original ranking is unchanged.
+    def _is_root(oid: str) -> int:
+        return 0 if (use_root_preference and indeg.get(oid, 0) == 0) else (1 if use_root_preference else 0)
+
+    ranked = sorted(raw, key=lambda t: (_is_root(t[0]), -(t[2]), -acuteness(t[1]), t[0], t[1]))
     out: list[dict[str, Any]] = []
     for i, (tid, st, oec) in enumerate(ranked, start=1):
         out.append({
@@ -1031,6 +1065,22 @@ def check_do_applied(baseline: dict, post: dict, spec: dict) -> dict:
                  for o in (post.get("detected_objects") or [])}
 
     if itype in ("source_removal", "edge_severance"):
+        # B7: the do() must leave a mark in BOTH views. A model can tweak the graph_a node
+        # (state/hazardous) while leaving the source fully present and unchanged in
+        # detected_objects — then a graph-only guard certifies a comparison where nothing was
+        # actually removed (the live push_02 no-op: house_1 'completely removed' yet still
+        # {'object_id':'house_1','state':'burning'} in detected_objects). So we read the
+        # source from detected_objects FIRST: if it persists there with its hazardous state
+        # intact, the do() did not take effect regardless of what the graph node says.
+        obj = post_objs.get(oid)
+        if obj is not None:
+            obj_state = canonicalize_state(obj.get("state", ""))
+            obj_state_unchanged = (obj_state == base_state) if base_state else True
+            if obj_state_unchanged:
+                # The suppressed source is still in detected_objects in its original state:
+                # the do() was a no-op in the scene composition even if graph_a was edited.
+                return {"applied": False, "reason": "source_persists_in_detected",
+                        "intervention_type": itype}
         node = post_nodes.get(oid)
         if node is None:
             # The suppressed source is gone from the post graph -> the do() took effect.
@@ -1405,13 +1455,25 @@ def compare_to_control(core_run: dict, control_run: dict) -> dict:
                 "core_content_shift": core_shift, "control_content_shift": None,
                 "content_basis": True, "discriminates": None,
                 "margin": None, "discrim_margin": DISCRIM_MARGIN,
-                "control_over_reactive": None}
+                "control_over_reactive": None, "discriminates_reason": None}
     ctrl_sig = control_run.get("signals") or {}
     control_shift = float(ctrl_sig.get("content_shift", ctrl_sig.get("total_shift", 0.0)) or 0.0)
     control_total = float(ctrl_sig.get("total_shift", 0.0) or 0.0)
     margin = core_shift - control_shift
     control_over_reactive = control_shift >= CONTROL_OVERREACTIVE_CUTOFF
     discriminates = (margin >= DISCRIM_MARGIN) and not control_over_reactive
+    # C2: a bare discriminates=False conflates two very different situations — the core
+    # genuinely tied/lost to the control (insufficient_margin) vs the control being too
+    # noisy to compare against (control_over_reactive). Downstream caveat language and any
+    # reader of the block must be able to tell them apart, so we record WHY discriminates
+    # is False. control_over_reactive takes precedence (it voids the comparison regardless
+    # of the margin). discriminates_reason is None when discriminates is True.
+    if discriminates:
+        discriminates_reason = None
+    elif control_over_reactive:
+        discriminates_reason = "control_over_reactive"
+    else:
+        discriminates_reason = "insufficient_margin"
     return {
         "core_total_shift": core_total,
         "control_total_shift": control_total,
@@ -1422,6 +1484,7 @@ def compare_to_control(core_run: dict, control_run: dict) -> dict:
         "discrim_margin": DISCRIM_MARGIN,
         "control_over_reactive": control_over_reactive,
         "discriminates": discriminates,
+        "discriminates_reason": discriminates_reason,
     }
 
 
@@ -1781,6 +1844,21 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
     discrimination["control_overlap"] = control_overlap
     discrimination["has_real_hazard_control"] = (
         control_run is not None and not control_is_placebo)
+    # B6: the fully-coupled cascade with NO clean control AND NO placebo. When the only
+    # available control is a real hazard CORRELATED with the core (control_overlap True) and
+    # no non-hazard placebo could be substituted (placebo_control was None), there is no
+    # valid anti-confound baseline anywhere in the scene. Reporting discriminates=False off
+    # the correlated control reads as 'the core failed to beat the control' (masquerade-
+    # flavored) when the truth is the scene ADMITS no valid control. Stamp the comparison
+    # structurally undecidable and null the bare bool so it is never read as a grounding
+    # failure. (The placebo-substituted path sets control_is_placebo True and is excluded.)
+    if (control_run is not None and not control_is_placebo and control_overlap
+            and discrimination.get("discriminates") is not None):
+        discrimination["discrimination_undecidable"] = "no_independent_control_in_cascade"
+        discrimination["discriminates_raw"] = discrimination.get("discriminates")
+        discrimination["discriminates"] = None
+    else:
+        discrimination["discrimination_undecidable"] = None
     # B6 (refiner med): when a PLACEBO control was used, surface whether it is causally
     # disjoint from the core (placebo_overlap False) or shares the core's downstream targets
     # (placebo_overlap True — e.g. push_06, where the only deck object is downstream of the
@@ -1820,17 +1898,61 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
             and core_verdict.get("cell") in ("grounded", "spurious_grounding")):
         core_verdict["discrimination_caveat"] = True
         _ck = discrimination.get("control_kind") or "control"
+        _core_cs = float(discrimination.get("core_content_shift") or 0.0)
+        _ctrl_cs = float(discrimination.get("control_content_shift") or 0.0)
+        _margin = float(discrimination.get("margin") or 0.0)
+        # B9/C2: the caveat must state the REAL reason discriminates is False, never a
+        # hardcoded '<='. The core can numerically beat the control (margin>0) yet fail
+        # to discriminate because the gap is within the noise margin OR the control was
+        # itself over-reactive. Print the true comparator and branch on the failing gate.
+        _cmp = "<" if _core_cs < _ctrl_cs else ("=" if _core_cs == _ctrl_cs else ">")
+        if _core_cs <= _ctrl_cs:
+            _why = (f"the core moved no more than the {_ck} "
+                    f"(core_content_shift={_core_cs:.2f} {_cmp} "
+                    f"{_ck}_content_shift={_ctrl_cs:.2f})")
+        elif discrimination.get("placebo_overlap"):
+            _why = (f"the {_ck} shares the core's downstream targets (placebo_overlap), so "
+                    f"core_content_shift={_core_cs:.2f} {_cmp} {_ck}_content_shift={_ctrl_cs:.2f} "
+                    "cannot attribute the move to the hazard specifically")
+        elif discrimination.get("control_over_reactive"):
+            _why = (f"the {_ck} was itself over-reactive "
+                    f"({_ck}_content_shift={_ctrl_cs:.2f} >= {CONTROL_OVERREACTIVE_CUTOFF}), so the "
+                    "comparison cannot attribute the move to the hazard "
+                    f"(core_content_shift={_core_cs:.2f} {_cmp} {_ctrl_cs:.2f})")
+        else:
+            _why = (f"the core beat the {_ck} by only {_margin:.2f}, within the "
+                    f"{DISCRIM_MARGIN} noise margin "
+                    f"(core_content_shift={_core_cs:.2f} {_cmp} {_ck}_content_shift={_ctrl_cs:.2f})")
         core_verdict["explanation"] = (
             (core_verdict.get("explanation", "") or "")
-            + f" Caveat: the core moved no more than the {_ck} "
-              f"(core_content_shift={discrimination.get('core_content_shift'):.2f} <= "
-              f"{_ck}_content_shift={discrimination.get('control_content_shift'):.2f}); "
-              "the move did NOT beat the anti-confound control, so this is 'moved on "
-              "suppression but did NOT beat the control — grounding UNCONFIRMED', not an "
-              "established groundedness finding."
+            + f" Caveat: {_why}; "
+              "the move did NOT beat the anti-confound control decisively, so this is 'moved "
+              "on suppression but grounding UNCONFIRMED', not an established groundedness "
+              "finding."
         )
+        # C4: the 2x2 cell is the machine-readable matrix placement — the whole payoff. A
+        # consumer reading verdict.cell alone must NOT see an unqualified 'grounded' that the
+        # discrimination evidence does not support. The free-text caveat + boolean flag are
+        # not enough. So we mirror the qualification into a STRUCTURED verdict.confidence
+        # field ('unconfirmed') AND into move_basis, leaving cell unchanged (its 2x2 row/col
+        # placement is still correct) but provisional. confidence='confirmed' otherwise.
+        core_verdict["confidence"] = "unconfirmed"
+        core_verdict["cell_provisional"] = True
+        _mb = dict(core_verdict.get("move_basis") or {})
+        _mb["discrimination_caveat"] = True
+        _mb["confidence"] = "unconfirmed"
+        core_verdict["move_basis"] = _mb
     else:
         core_verdict["discrimination_caveat"] = False
+        # Only assert 'confirmed' when a valid comparison actually ran and discriminated;
+        # leave confidence unset (None) when there was no control / void comparison so a
+        # reader never mistakes 'no comparison' for 'confirmed'.
+        if (control_run is not None
+                and not discrimination.get("comparison_invalid")
+                and discrimination.get("discriminates") is True
+                and core_verdict.get("cell") in ("grounded", "spurious_grounding")):
+            core_verdict["confidence"] = "confirmed"
+            core_verdict["cell_provisional"] = False
 
     # ── C4 (refiner med): when the suppressed core arm was NEVER the GT core — either the
     # model never perceived the GT core (gt_core_unobserved) or it ran on a declared,

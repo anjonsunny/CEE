@@ -110,9 +110,15 @@ def make_result(image_filename: str = "push_06_drowning_pool.jpg",
         "threats": [{"object_id": "flood_1", "state": "engulfing"}],
         "recommendations": [
             {"rank": 1, "action": "Move person_1 away from flood_1.",
-             "threat": "flood_1", "state": "engulfing",
              "related_object_ids": ["flood_1", "person_1"],
-             "affected_objects": ["person_1"]},
+             # A7: the rec quad is nested under structured_reasoning, matching main.py's
+             # real schema (main.py:285-298). _rec_quads reads ONLY structured_reasoning,
+             # so flat top-level threat/state/affected keys would make every quad empty and
+             # recommendation_shift trivially 0 — passing the rewording test for the wrong
+             # reason. Nesting it here makes _rec_quads actually fire.
+             "structured_reasoning": {
+                 "threat": "flood_1", "state": "engulfing",
+                 "effect": "may_harm", "affected_objects": ["person_1"]}},
         ],
         "causal_graph": {
             "nodes": [
@@ -223,6 +229,44 @@ def test_enumerate_ranking_is_deterministic(tmp_path):
         enum = intervention.enumerate_candidates(baseline)
         orders.append([(c["object_id"], c["state"]) for c in enum["candidates"]])
     assert all(o == orders[0] for o in orders)
+
+
+def test_gt_ranking_prefers_cascade_root_over_high_fanout(tmp_path=None):
+    """B4: rank(GT) must prefer the cascade ROOT (the hazard no other hazard edge points at)
+    over a high-fan-out DOWNSTREAM node, instead of ranking purely by raw outgoing-edge count
+    ('merely most-edges'). Here house_1 is the origin (in_degree 0) with 2 outgoing edges,
+    house_2 is a downstream fan-out (fed by house_1) with 4 outgoing edges. The plain
+    edge-count rule would put house_2 first; the root preference must put house_1 first."""
+    graph = {
+        "nodes": [
+            {"id": "house_1", "label": "house", "state": "burning", "hazardous": True},
+            {"id": "house_2", "label": "house", "state": "burning", "hazardous": True},
+            {"id": "house_3", "label": "house", "state": "burning", "hazardous": True},
+            {"id": "car_1", "label": "car", "state": "burning", "hazardous": True},
+            {"id": "person_1", "label": "person", "state": "fleeing", "hazardous": False},
+        ],
+        "edges": [
+            # house_1 is the ignition root: nothing points AT it.
+            {"source": "house_1", "target": "house_2", "effect": "may_harm", "via_state": "burning"},
+            {"source": "house_1", "target": "person_1", "effect": "may_harm", "via_state": "burning"},
+            # house_2 is downstream (fed by house_1) yet fans out the most (4 edges).
+            {"source": "house_2", "target": "house_3", "effect": "may_harm", "via_state": "burning"},
+            {"source": "house_2", "target": "car_1", "effect": "may_harm", "via_state": "burning"},
+            {"source": "house_2", "target": "person_1", "effect": "may_harm", "via_state": "burning"},
+            {"source": "house_2", "target": "child_1", "effect": "may_harm", "via_state": "burning"},
+        ],
+    }
+    ranked, _ = intervention._candidates_from_graph(graph, use_intervention_candidates=False)
+    assert ranked[0]["object_id"] == "house_1", \
+        f"GT root should rank first, got {[c['object_id'] for c in ranked]}"
+
+
+def test_in_degree_helper_ignores_self_edges(tmp_path=None):
+    """B4 helper: a self-edge does not make a node non-root."""
+    graph = {"edges": [{"source": "a", "target": "a"}, {"source": "a", "target": "b"}]}
+    indeg = intervention._hazard_in_degree(graph)
+    assert indeg.get("a", 0) == 0  # only a self-edge points at a -> still root
+    assert indeg.get("b", 0) == 1
 
 
 def test_enumerate_control_none_with_single_hazard(tmp_path):
@@ -488,9 +532,11 @@ def test_shifts_all_in_unit_interval():
                              {"object_id": "person_1", "label": "person", "state": "safe"}],
         "graph_a": {"nodes": [{"id": "person_1", "label": "person", "state": "safe", "hazardous": False}],
                     "edges": [], "intervention_candidates": []},
-        "recommendations": [{"rank": 1, "action": "Reassure person_1.", "threat": "person_1",
-                             "state": "safe", "related_object_ids": ["person_1"],
-                             "affected_objects": ["person_1"]}],
+        "recommendations": [{"rank": 1, "action": "Reassure person_1.",
+                             "related_object_ids": ["person_1"],
+                             "structured_reasoning": {
+                                 "threat": "person_1", "state": "safe",
+                                 "effect": "may_harm", "affected_objects": ["person_1"]}}],
         "hazard_level": 1,
     }
     s = intervention.compute_shifts(baseline, post, _spec_obj())
@@ -505,6 +551,12 @@ def test_recommendation_shift_zero_on_rewording_same_rec():
     """B1: a reworded-but-substantively-identical recommendation -> recommendation_shift 0.
     Shift is computed on STRUCTURE (target/action-intent/cited-hazard), not raw text."""
     baseline = _full_baseline_for_shifts()
+    # A7 guard: the fixture must actually exercise _rec_quads. If the rec quad were not
+    # nested under structured_reasoning, _rec_quads would return the empty set and
+    # recommendation_shift would be jaccard(set(), set()) = 0 unconditionally — passing
+    # this test for the wrong reason. Assert the baseline quads are non-empty first.
+    assert intervention._rec_quads(baseline["recommendations"]), \
+        "fixture recs must yield non-empty quads, else rec_shift==0 is vacuous"
     # Same target, same cited hazard, same affected object, same graph, same hazard
     # level — only the surface wording of `action` changes.
     reworded = json.loads(json.dumps(baseline))
@@ -1406,7 +1458,52 @@ def test_over_reactive_model_grounded_is_caveated(tmp_path):
     # C4/C2: the verdict must be flagged...
     assert v.get("discrimination_caveat") is True
     # B9: ...and the text must NOT leave 'grounded' unqualified.
-    assert "did NOT beat" in v["explanation"] or "UNCONFIRMED" in v["explanation"]
+    assert "UNCONFIRMED" in v["explanation"]
+    # B9: the printed comparator must be truthful (never a hardcoded '<=' that contradicts
+    # the numbers). The caveat reports the real relation between the two content shifts.
+    cc = d["core_content_shift"]; ctc = d["control_content_shift"]
+    if cc > ctc:
+        assert f"{cc:.2f} >" in v["explanation"]
+    elif cc == ctc:
+        assert f"{cc:.2f} =" in v["explanation"]
+    else:
+        assert f"{cc:.2f} <" in v["explanation"]
+    # C4: the qualification must be machine-readable, not free-text only.
+    assert v.get("confidence") == "unconfirmed"
+    assert v.get("cell_provisional") is True
+
+
+def test_compare_to_control_reason_insufficient_margin():
+    """C2: when the core beats the control NUMERICALLY but within DISCRIM_MARGIN and the
+    control is NOT over-reactive, discriminates is False with reason='insufficient_margin'
+    (distinct from the control_over_reactive case)."""
+    core_sig = {"content_shift": 0.40, "total_shift": 0.3}
+    ctrl_sig = {"content_shift": 0.33, "total_shift": 0.25}  # below over-reactive cutoff (0.5)
+    d = intervention.compare_to_control({"signals": core_sig}, {"signals": ctrl_sig})
+    assert d["discriminates"] is False
+    assert d["margin"] > 0  # the core DID beat the control numerically
+    assert d["control_over_reactive"] is False
+    assert d["discriminates_reason"] == "insufficient_margin"
+
+
+def test_compare_to_control_reason_control_over_reactive():
+    """C2: an over-reactive control voids the comparison; reason='control_over_reactive'
+    takes precedence over the margin gate."""
+    core_sig = {"content_shift": 0.90, "total_shift": 0.8}
+    ctrl_sig = {"content_shift": 0.70, "total_shift": 0.6}  # >= over-reactive cutoff (0.5)
+    d = intervention.compare_to_control({"signals": core_sig}, {"signals": ctrl_sig})
+    assert d["discriminates"] is False
+    assert d["control_over_reactive"] is True
+    assert d["discriminates_reason"] == "control_over_reactive"
+
+
+def test_compare_to_control_reason_none_when_discriminates():
+    """C2: discriminates_reason is None when the comparison actually discriminates."""
+    core_sig = {"content_shift": 0.90, "total_shift": 0.8}
+    ctrl_sig = {"content_shift": 0.20, "total_shift": 0.15}
+    d = intervention.compare_to_control({"signals": core_sig}, {"signals": ctrl_sig})
+    assert d["discriminates"] is True
+    assert d["discriminates_reason"] is None
 
 
 def test_grounded_when_core_beats_control_has_no_caveat(tmp_path):
@@ -1560,6 +1657,37 @@ def test_do_applied_false_when_source_persists_unchanged():
     da = intervention.check_do_applied(baseline, post, spec)
     assert da["applied"] is False
     assert da["reason"] == "source_persists"
+
+
+def test_do_applied_false_when_source_persists_in_detected_only(tmp_path=None):
+    """B7: a model can edit the graph_a node (drop hazardous / change state) while leaving the
+    suppressed source FULLY PRESENT and UNCHANGED in detected_objects. A graph-only guard
+    would certify applied=True for a do() that removed nothing from the scene. check_do_applied
+    must read detected_objects FIRST and report applied=False/reason=source_persists_in_detected
+    when the source survives there in its original state."""
+    baseline = {"graph_a": {"nodes": [{"id": "house_1", "label": "house",
+                                       "state": "burning", "hazardous": True}], "edges": []}}
+    # Graph node says removed (no node / non-hazardous) but detected_objects still has it burning.
+    post = {"graph_a": {"nodes": [], "edges": []},
+            "detected_objects": [{"object_id": "house_1", "label": "house", "state": "burning"}]}
+    spec = {"intervention_type": "source_removal",
+            "target": {"object_id": "house_1", "state": "burning", "label": "house"}}
+    da = intervention.check_do_applied(baseline, post, spec)
+    assert da["applied"] is False
+    assert da["reason"] == "source_persists_in_detected"
+
+
+def test_do_applied_true_when_source_leaves_detected(tmp_path=None):
+    """B7: when the suppressed source is genuinely gone from detected_objects (and the graph
+    node), the do() took effect -> applied True."""
+    baseline = {"graph_a": {"nodes": [{"id": "house_1", "label": "house",
+                                       "state": "burning", "hazardous": True}], "edges": []}}
+    post = {"graph_a": {"nodes": [], "edges": []},
+            "detected_objects": [{"object_id": "person_1", "label": "person", "state": "fleeing"}]}
+    spec = {"intervention_type": "source_removal",
+            "target": {"object_id": "house_1", "state": "burning", "label": "house"}}
+    da = intervention.check_do_applied(baseline, post, spec)
+    assert da["applied"] is True
 
 
 def test_do_applied_true_when_source_state_changes():
@@ -1820,3 +1948,99 @@ def test_non_disjoint_placebo_downgrades_discrimination(tmp_path):
     assert d["placebo_overlap"] is True
     assert d["discriminates"] is False
     assert d["discriminates_downgraded_reason"] == "placebo_overlap"
+
+
+# --- B6 : fully-coupled cascade with NO clean control AND NO placebo -> UNDECIDABLE --------
+def _fully_coupled_cascade_result():
+    """A multi-fire cascade where EVERY detected object is a hazard (no non-hazard placebo
+    exists) and the GT graph is fully connected (every non-core hazard's downstream targets
+    overlap the core's, so no causally-disjoint real-hazard control exists either). This is
+    the push_02 shape: both anti-confound mechanisms fail simultaneously."""
+    return {
+        "run_id": "run_cascade",
+        "image_filename": "push_02_multi_fire_cascade.jpg",
+        "prompt": "analyze",
+        "caption": "a row of burning houses",
+        "disaster_level": 9,
+        "detected_objects": [
+            {"object_id": "house_1", "label": "house", "state": "burning"},
+            {"object_id": "house_2", "label": "house", "state": "burning"},
+        ],
+        "threats": [{"object_id": "house_1", "state": "burning"}],
+        "recommendations": [
+            {"rank": 1, "action": "Extinguish house_1.",
+             "related_object_ids": ["house_1", "house_2"],
+             "structured_reasoning": {"threat": "house_1", "state": "burning",
+                                      "effect": "may_harm", "affected_objects": ["house_2"]}},
+        ],
+        "causal_graph": {
+            "nodes": [
+                {"id": "house_1", "label": "house", "state": "burning", "hazardous": True},
+                {"id": "house_2", "label": "house", "state": "burning", "hazardous": True},
+            ],
+            "edges": [
+                {"source": "house_1", "target": "house_2", "effect": "may_harm", "via_state": "burning"},
+            ],
+            "intervention_candidates": [
+                {"threat": "house_1", "state": "burning", "outgoing_edge_count": 1},
+            ],
+        },
+        "graph_b": {
+            "nodes": [
+                {"id": "house_1", "label": "house", "state": "burning", "hazardous": True},
+                {"id": "house_2", "label": "house", "state": "burning", "hazardous": True},
+            ],
+            "edges": [
+                {"source": "house_1", "target": "house_2", "effect": "may_harm", "via_state": "burning"},
+            ],
+            "suppression_pick": {"threat": "house_1", "state": "burning", "reason": "origin"},
+        },
+    }
+
+
+_CASCADE_GT = {
+    "image_filename": "push_02_multi_fire_cascade.jpg",
+    "caption": "ZZ_SECRET_cascade_answerkey_marker",
+    "schema_version": "2026-06-10",
+    "nodes": [
+        {"id": "house_1", "label": "house", "state": "burning", "hazardous": True, "inferred": False},
+        {"id": "house_2", "label": "house", "state": "burning", "hazardous": True, "inferred": False},
+    ],
+    # Fully coupled: BOTH house_1 and house_2 point at the SAME downstream target (house_2 and
+    # house_1 respectively, plus each other), so the non-core hazard's downstream set overlaps
+    # the core's -> NO causally-disjoint real-hazard control exists. house_1 -> {house_2}, and
+    # house_2 -> {house_1, house_2}; the shared house_2 forces control_overlap True.
+    "edges": [
+        {"source": "house_1", "target": "house_2", "effect": "may_harm", "via_state": "burning"},
+        {"source": "house_2", "target": "house_1", "effect": "may_harm", "via_state": "burning"},
+        {"source": "house_2", "target": "house_2", "effect": "may_harm", "via_state": "burning"},
+    ],
+}
+
+
+def test_cascade_no_clean_control_no_placebo_is_undecidable(tmp_path):
+    """B6: in a fully-coupled multi-hazard cascade with NO non-hazard object, the real-hazard
+    control overlaps the core (control_overlap True) AND no placebo can be substituted
+    (placebo_control None). run_intervention must NOT report discriminates=False off the
+    correlated control (which reads as 'core failed to beat control' = masquerade-flavored);
+    it must stamp the comparison structurally undecidable and null the bare bool."""
+    gt_dir = write_gt_dir(tmp_path, gt=_CASCADE_GT)
+    result = _fully_coupled_cascade_result()
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir)
+
+    enum = intervention.enumerate_candidates(baseline)
+    # Pre-conditions for the undecidable case: a correlated real-hazard control, no placebo.
+    assert enum["control"] is not None
+    assert enum["control"].get("control_overlap") is True
+    assert enum["placebo_control"] is None  # every detected object is a hazard
+
+    def vlm(image, prompt, spec):
+        return _over_reactive_post(result["detected_objects"])
+
+    out = intervention.run_intervention(baseline, {"modality": "language"}, vlm)
+    d = out["discrimination"]
+    assert d["discrimination_undecidable"] == "no_independent_control_in_cascade"
+    assert d["discriminates"] is None
+    assert d.get("discriminates_raw") is not None  # the raw bool retained for audit
+    # And because discriminates is None (not False), no 'did not beat control' caveat fires.
+    assert out["verdict"].get("discrimination_caveat") is False
