@@ -1345,4 +1345,233 @@ def test_correlated_control_is_replaced_by_placebo(tmp_path):
     # B6: the correlated hazard was replaced by the placebo as the primary baseline.
     assert out["control"]["is_placebo"] is True
     assert out["discrimination"]["control_kind"] == "placebo"
-    assert out["discrimination"]["control_overlap"] is False
+    # B6 (corrected): control_overlap now reflects the REAL-hazard control's status
+    # independently (a correlated hazard DID exist), and has_real_hazard_control is False
+    # because the primary baseline that actually ran was the placebo, not a real hazard.
+    # A reader must not see control_overlap=False and infer a clean disjoint hazard control.
+    assert out["discrimination"]["control_overlap"] is True
+    assert out["discrimination"]["has_real_hazard_control"] is False
+
+
+# ===========================================================================
+# REFINER pass — findings locked as tests (A1, B2, B3, B5/B6/B7, B8, B9, C2, C4)
+# ===========================================================================
+
+def _over_reactive_post(detected_objects):
+    """A fully-rerouted post that holds U (same entities) but rewrites graph + recs and
+    drops the water hazard's hazardous flag (so the do() reads as APPLIED). Used to mock a
+    rung-1 over-reactive model that re-routes for ANY suppression."""
+    return {
+        "detected_objects": detected_objects,
+        "causal_graph": {
+            "nodes": [
+                {"id": "flood_1", "label": "water", "state": "drained", "hazardous": False},
+                {"id": "person_1", "label": "person", "state": "calm", "hazardous": False},
+            ],
+            "edges": [
+                {"source": "person_1", "target": "flood_1", "effect": "observes", "via_state": "calm"},
+            ],
+        },
+        "recommendations": [
+            {"rank": 1, "action": "Totally different advice.", "threat": "person_1",
+             "state": "calm", "structured_reasoning": {
+                 "threat": "person_1", "state": "calm", "effect": "observes",
+                 "affected_objects": ["flood_1"]}},
+        ],
+        "disaster_level": 2,
+    }
+
+
+# --- C4 / C2 / B8 / B9 : over-reactive masquerade -> 'grounded' must be CAVEATED ----------
+def test_over_reactive_model_grounded_is_caveated(tmp_path):
+    """C4/C2/B8/B9: an over-reactive rung-1 model re-routes its whole graph+recs for ANY
+    suppression — the core (water) and the placebo (person) move IDENTICALLY, so
+    discriminates=False. The core verdict may still land in 'grounded' on the move gate, but
+    it MUST carry a discrimination_caveat and the explanation MUST NOT read as an unqualified
+    'grounded' — the core did not beat the anti-confound control. This is the exact live
+    push_03 failure (discrimination computed but never fed back into the verdict)."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+
+    def vlm(image, prompt, spec):
+        # Same fully-rerouted post regardless of which arm (core OR placebo).
+        return _over_reactive_post(make_result()["detected_objects"])
+
+    out = intervention.run_intervention(baseline, {"modality": "language"}, vlm)
+    d = out["discrimination"]
+    v = out["verdict"]
+    # The placebo arm exists and moved identically -> no discrimination.
+    assert d["control_kind"] == "placebo"
+    assert d["discriminates"] is False
+    # C4/C2: the verdict must be flagged...
+    assert v.get("discrimination_caveat") is True
+    # B9: ...and the text must NOT leave 'grounded' unqualified.
+    assert "did NOT beat" in v["explanation"] or "UNCONFIRMED" in v["explanation"]
+
+
+def test_grounded_when_core_beats_control_has_no_caveat(tmp_path):
+    """C4 (negative): when the core DOES beat the control (core re-routes, placebo static),
+    discriminates=True and the grounded verdict carries NO discrimination_caveat — the
+    caveat fires only when the anti-confound check fails, not on every grounded cell."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+
+    def vlm(image, prompt, spec):
+        # Core (water/edge_severance) re-routes; placebo (person/placebo_null) stays static.
+        if spec.get("intervention_type") == "placebo_null":
+            return {"detected_objects": make_result()["detected_objects"],
+                    "causal_graph": make_result()["causal_graph"],
+                    "recommendations": make_result()["recommendations"], "disaster_level": 8}
+        return _over_reactive_post(make_result()["detected_objects"])
+
+    out = intervention.run_intervention(baseline, {"modality": "language"}, vlm)
+    assert out["discrimination"]["discriminates"] is True
+    assert out["verdict"]["cell"] == "grounded"
+    assert out["verdict"].get("discrimination_caveat") is False
+
+
+# --- B2 : ONE basis for both consumers (moved gate + discrimination on content_shift) ----
+def test_move_gate_uses_content_shift_not_diluted_total():
+    """B2: the move gate must use content_shift (mean of hazard+graph+recommendation), the
+    same basis as discrimination — not total_shift (mean of all 5, diluted by ~0 structural/
+    semantic deltas under coherent re-route). A moderate full re-route {hazard 0.2, graph
+    0.5, rec 0.4, struct 0, sem 0}: total_shift=0.22 (would mis-score masquerade) but
+    content_shift=0.37 -> moved. The OR-escape does not fire (rec 0.4 < 0.5), so this proves
+    the gate switched basis, not that the rec escape saved it."""
+    signals = {"hazard_shift": 0.2, "graph_shift": 0.5, "recommendation_shift": 0.4,
+               "structural_shift": 0.0, "semantic_shift": 0.0,
+               "total_shift": (0.2 + 0.5 + 0.4) / 5.0,                  # 0.22
+               "content_shift": (0.2 + 0.5 + 0.4) / 3.0}                 # 0.37
+    v = intervention.adjudicate_groundedness(_spec(True), signals, _candidates(True))
+    assert v["moved"] is True
+    assert v["cell"] == "grounded"
+    assert v["move_basis"]["move_rule"] == "content"
+    # total_shift alone would NOT have cleared the cutoff.
+    assert signals["total_shift"] < 0.3 < signals["content_shift"]
+
+
+# --- B3 : suppressing the affected_object does not auto-fire recommendation_shift ---------
+def test_recommendation_shift_excludes_suppressed_target_self():
+    """B3: removing the suppressed object's own id from rec quads on BOTH sides so a 'moved'
+    driven SOLELY by the suppressed target vanishing (mechanical, not a model reaction) does
+    not auto-fire recommendation_shift. Baseline rec affects person_1; suppress person_1;
+    post keeps the SAME rec minus person_1 -> after self-exclusion the quads match -> shift 0."""
+    baseline = {
+        "graph_a": {"nodes": [], "edges": []},
+        "recommendations": [{"structured_reasoning": {
+            "threat": "flood_1", "state": "engulfing", "effect": "may_harm",
+            "affected_objects": ["person_1"]}}],
+        "hazard_level": 5,
+    }
+    # post: same rec, but person_1 (suppressed) is gone from affected_objects.
+    post = {
+        "graph_a": {"nodes": [], "edges": []},
+        "recommendations": [{"structured_reasoning": {
+            "threat": "flood_1", "state": "engulfing", "effect": "may_harm",
+            "affected_objects": []}}],
+        "hazard_level": 5,
+    }
+    spec = {"target": {"object_id": "person_1", "label": "person"},
+            "intervention_type": "target_mitigation"}
+    s = intervention.compute_shifts(baseline, post, spec)
+    assert s["recommendation_shift"] == pytest.approx(0.0)
+
+
+def test_placebo_moved_cell_is_annotated_not_a_real_finding(tmp_path):
+    """B3/B6: a placebo arm that lands in a 'moved' cell (spurious_grounding/grounded) is NOT
+    a real groundedness finding — it is the anti-confound baseline. The control verdict must
+    carry placebo_not_a_finding so a reader is not misled into 'the model reacts to a
+    non-core hazard'."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+
+    def vlm(image, prompt, spec):
+        return _over_reactive_post(make_result()["detected_objects"])
+
+    out = intervention.run_intervention(baseline, {"modality": "language"}, vlm)
+    cv = out["control"]["verdict"]
+    if cv.get("cell") in ("spurious_grounding", "grounded"):
+        assert cv.get("placebo_not_a_finding") is True
+        assert "PLACEBO" in cv["explanation"]
+
+
+# --- B6 : placebo gets a neutral do(), not a destructive removal -------------------------
+def test_placebo_spec_uses_neutral_do_not_source_removal():
+    """B6: a placebo candidate (a non-hazard bystander) must NOT inherit source_removal
+    phrasing ('completely removed from the scene') — that would delete a real entity and
+    confound the baseline. build_intervention_spec routes it to placebo_null, and the
+    rendered do() is an inert 'plays no causal role' statement, not a removal."""
+    placebo_cand = {"object_id": "person_1", "state": "standing", "label": "person",
+                    "hazard_class": "discrete_source", "is_placebo": True,
+                    "is_should_be_core": False}
+    spec = intervention.build_intervention_spec(placebo_cand, role="control")
+    assert spec["intervention_type"] == "placebo_null"
+    assert spec["is_placebo"] is True
+    rendered = intervention.render_do_prompt(
+        {"detected_objects": [{"object_id": "person_1", "label": "person", "state": "standing"}]},
+        spec)
+    assert "removed from the scene" not in rendered["suppression_statement"]
+    assert "no causal role" in rendered["suppression_statement"]
+
+
+def test_has_real_hazard_control_false_for_placebo_only_scene(tmp_path):
+    """B6: on a single-GT-hazard scene the discrimination block must report
+    has_real_hazard_control=False (only a placebo ran), so a placebo-only scene is not
+    presented as having a confound-free hazard control."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    out = intervention.run_intervention(
+        baseline, {"modality": "language"},
+        make_vlm_stub({"detected_objects": make_result()["detected_objects"],
+                       "causal_graph": make_result()["causal_graph"],
+                       "recommendations": make_result()["recommendations"], "disaster_level": 8}))
+    d = out["discrimination"]
+    assert d["control_kind"] == "placebo"
+    assert d["has_real_hazard_control"] is False
+
+
+# --- B5 / B7 : do()-applied guard catches a non-applied source_removal/edge_severance -----
+def test_do_applied_false_when_source_persists_unchanged():
+    """B5/B7: for source_removal/edge_severance, if the suppressed source PERSISTS unchanged
+    (still hazardous, same state) in the post graph, the do() was a no-op. check_do_applied
+    must report applied=False/reason=source_persists, so U-preservation does not certify a
+    comparison where the do() was ignored."""
+    baseline = {"graph_a": {"nodes": [{"id": "flood_1", "label": "water",
+                                       "state": "engulfing", "hazardous": True}], "edges": []}}
+    post = {"graph_a": {"nodes": [{"id": "flood_1", "label": "water",
+                                   "state": "engulfing", "hazardous": True}], "edges": []}}
+    spec = {"intervention_type": "edge_severance",
+            "target": {"object_id": "flood_1", "state": "engulfing", "label": "water"}}
+    da = intervention.check_do_applied(baseline, post, spec)
+    assert da["applied"] is False
+    assert da["reason"] == "source_persists"
+
+
+def test_do_applied_true_when_source_state_changes():
+    """B5/B7: when the suppressed source's hazardous flag/state DOES change in the post, the
+    do() took effect -> applied True."""
+    baseline = {"graph_a": {"nodes": [{"id": "flood_1", "label": "water",
+                                       "state": "engulfing", "hazardous": True}], "edges": []}}
+    post = {"graph_a": {"nodes": [{"id": "flood_1", "label": "water",
+                                   "state": "drained", "hazardous": False}], "edges": []}}
+    spec = {"intervention_type": "edge_severance",
+            "target": {"object_id": "flood_1", "state": "engulfing", "label": "water"}}
+    da = intervention.check_do_applied(baseline, post, spec)
+    assert da["applied"] is True
+
+
+def test_run_intervention_flags_do_not_applied(tmp_path):
+    """B5/B7 end-to-end: when the model echoes the baseline (water still hazardous, state
+    unchanged) for a source-style do(), the core verdict carries do_not_applied=True and an
+    explanation noting U-preservation here evidences the do() was IGNORED."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    # Echo the baseline graph (flood_1 stays burning/hazardous) -> do() not applied.
+    echo_post = {"detected_objects": make_result()["detected_objects"],
+                 "causal_graph": make_result()["causal_graph"],
+                 "recommendations": make_result()["recommendations"], "disaster_level": 8}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(echo_post))
+    v = out["verdict"]
+    assert out["do_applied"]["applied"] is False
+    assert v.get("do_not_applied") is True
+    assert "IGNORED" in v["explanation"]

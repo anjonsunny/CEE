@@ -117,6 +117,15 @@ _TYPE_MAP = {
     "person_in_hazard": "target_mitigation",
 }
 
+#: B6: the placebo (null) control gets its OWN intervention_type so it is NOT phrased as a
+#: destructive removal/containment of a real entity. A placebo is an inert non-event: the
+#: object stays in the scene, it is merely declared to play no causal role. Routing it
+#: through source_removal ('completely removed from the scene') would make the placebo an
+#: actual deletion of a bystander — not a causally-independent baseline — confounding the
+#: discrimination check. Kept out of _TYPE_MAP (which keys on hazard_class) because the
+#: placebo distinction is the ARM, not the class.
+_PLACEBO_INTERVENTION_TYPE = "placebo_null"
+
 
 def _base_label(value: str) -> str:
     """The bare label of a node/object_id ('water_1' -> 'water'), lowercased."""
@@ -604,7 +613,16 @@ def build_intervention_spec(candidate: dict, intervention_type: str | None = Non
     hazard_class = candidate.get("hazard_class") or classify_hazard_class(
         candidate.get("label", ""), candidate.get("state", "")
     )
-    itype = intervention_type or _TYPE_MAP.get(hazard_class, "source_removal")
+    # B6: a placebo candidate is a NON-HAZARD baseline, not a hazard to remove. Unless the
+    # caller explicitly overrides intervention_type, route it to the inert placebo_null do()
+    # so the prompt does not destroy a real bystander (which would confound discrimination).
+    is_placebo = bool(candidate.get("is_placebo"))
+    if intervention_type:
+        itype = intervention_type
+    elif is_placebo:
+        itype = _PLACEBO_INTERVENTION_TYPE
+    else:
+        itype = _TYPE_MAP.get(hazard_class, "source_removal")
     is_core = bool(candidate.get("is_should_be_core"))
     resolved_role = role if role is not None else ("core" if is_core else "control")
     resolved_basis = core_basis if core_basis is not None else ("gt" if is_core else None)
@@ -620,6 +638,7 @@ def build_intervention_spec(candidate: dict, intervention_type: str | None = Non
         "is_should_be_core": is_core,
         "role": resolved_role,
         "core_basis": resolved_basis,
+        "is_placebo": is_placebo,   # B3/B6: a placebo arm is not a real spurious-grounding finding
     }
 
 
@@ -632,6 +651,10 @@ _DO_VERB = {
     "edge_severance": "has been fully contained and no longer spreads or reaches anything",
     "source_removal": "has been completely removed from the scene",
     "target_mitigation": "has been moved to safety and is no longer exposed",
+    # B6: placebo null do() — an INERT non-event. The entity is NOT removed/contained/moved;
+    # it remains in the scene exactly as before and is merely acknowledged to play no causal
+    # role in the hazards. A grounded model should not re-route its advice for this.
+    "placebo_null": "is acknowledged but is unchanged and plays no causal role in the scene's hazards",
 }
 
 
@@ -907,6 +930,52 @@ def check_u_preservation(baseline: dict, post: dict, spec: dict | None = None) -
     }
 
 
+def check_do_applied(baseline: dict, post: dict, spec: dict) -> dict:
+    """B5/B7: did the do() actually take effect on its target in the post?
+
+    U-preservation under the EMBED-BASELINE design is a COMPLIANCE check (the model is
+    handed its own ids and told to reuse them), not an independent leak detector — a high
+    object_overlap is consistent with the model faithfully holding U fixed OR with it merely
+    ECHOING the embedded baseline and ignoring the do() entirely. For source_removal /
+    edge_severance the do() says the source is removed / contained, so if the suppressed
+    entity (or its hazardous state) PERSISTS unchanged in the post graph, the do() was a
+    no-op and the comparison is not a valid counterfactual: U passing here would certify a
+    failure mode it should expose.
+
+    Returns {applied:bool, reason:str, intervention_type:str}. `applied` is True when the
+    do() leaves a detectable mark on its target; False (with reason 'source_persists') when a
+    source_removal/edge_severance target survives unchanged in the post graph. For
+    target_mitigation and placebo_null the persistence test does not apply (the entity is
+    meant to stay in the scene), so `applied` is reported True with reason 'not_checked'.
+    Pairs with check_u_preservation: object_overlap=1.0 is only evidence the comparison is
+    valid when applied is also True.
+    """
+    spec = spec or {}
+    itype = spec.get("intervention_type", "")
+    target = spec.get("target") or {}
+    oid = str(target.get("object_id", "") or "").strip()
+    base_state = canonicalize_state(target.get("state", ""))
+
+    if itype not in ("source_removal", "edge_severance") or not oid:
+        return {"applied": True, "reason": "not_checked", "intervention_type": itype}
+
+    post_graph = post.get("graph_a") or {}
+    post_nodes = {str(n.get("id", "")).strip(): n for n in (post_graph.get("nodes") or [])}
+
+    node = post_nodes.get(oid)
+    if node is None:
+        # The suppressed source is gone from the post graph -> the do() took effect.
+        return {"applied": True, "reason": "source_removed", "intervention_type": itype}
+
+    still_hazardous = bool(node.get("hazardous"))
+    post_state = canonicalize_state(node.get("state", ""))
+    state_unchanged = (post_state == base_state) if base_state else True
+    if still_hazardous and state_unchanged:
+        # Source persists in the post graph with its hazardous state intact: do() ignored.
+        return {"applied": False, "reason": "source_persists", "intervention_type": itype}
+    return {"applied": True, "reason": "state_changed", "intervention_type": itype}
+
+
 # ────────────────────────────────────────────────────────────
 # Step 6 — compute_shifts (the judgment-heavy core; Builder-designed)
 # ────────────────────────────────────────────────────────────
@@ -923,19 +992,34 @@ def check_u_preservation(baseline: dict, post: dict, spec: dict | None = None) -
 # The aggregation stays a tunable parameter for the reflect pass.
 
 
-def _rec_quads(recommendations: list[dict[str, Any]]) -> set[tuple[str, str, str, frozenset]]:
+def _rec_quads(recommendations: list[dict[str, Any]],
+               exclude_oid: str | None = None) -> set[tuple[str, str, str, frozenset]]:
     """STRUCTURE of a recommendation set: the set of quads
     (threat, state, effect, frozenset(affected_objects)). Wording (action/reason prose) is
     deliberately ignored, so a reworded-but-identical rec maps to the SAME quad ->
     recommendation_shift 0.
+
+    B3: `exclude_oid` drops the SUPPRESSED object's own id from each quad's threat and
+    affected set (on BOTH baseline and post) before the diff. Suppressing an object that is
+    the affected_object of a baseline rec MECHANICALLY invalidates that rec quad (its target
+    vanished), firing recommendation_shift=1.0 by construction independent of any grounding —
+    a placebo person who is the affected_object of the only rec would otherwise auto-score
+    'spurious_grounding'. Excluding the suppressed id makes recommendation_shift measure the
+    model's REACTION (does the advice re-route?), not the bookkeeping fact that the target
+    left the scene. A quad that becomes empty after exclusion is dropped.
     """
     quads: set[tuple[str, str, str, frozenset]] = set()
+    excl = str(exclude_oid or "").strip()
     for r in recommendations or []:
         sr = r.get("structured_reasoning") or {}
         threat = str(sr.get("threat", "")).strip()
         state = str(sr.get("state", "")).strip()
         effect = str(sr.get("effect", "")).strip()
         affected = frozenset(str(x).strip() for x in (sr.get("affected_objects") or []) if str(x).strip())
+        if excl:
+            if threat == excl:
+                threat = ""
+            affected = frozenset(a for a in affected if a != excl)
         if threat or affected:
             quads.add((threat, state, effect, affected))
     return quads
@@ -1047,9 +1131,13 @@ def compute_shifts(baseline: dict, post: dict, spec: dict) -> dict:
 
     graph_shift = _graph_shift(base_graph, post_graph)
 
+    # B3: drop the suppressed object's own id from rec quads on BOTH sides so a "moved"
+    # signal driven solely by the suppressed target vanishing (mechanical, not a model
+    # reaction) does not auto-fire recommendation_shift — critical for the placebo arm.
+    suppressed_oid = str((spec or {}).get("target", {}).get("object_id", "") or "").strip()
     recommendation_shift = _jaccard_distance(
-        _rec_quads(baseline.get("recommendations") or []),
-        _rec_quads(post.get("recommendations") or []),
+        _rec_quads(baseline.get("recommendations") or [], exclude_oid=suppressed_oid),
+        _rec_quads(post.get("recommendations") or [], exclude_oid=suppressed_oid),
     )
 
     base_struct = _structural_alignment(base_graph, baseline.get("recommendations") or [])
@@ -1111,14 +1199,22 @@ def adjudicate_groundedness(spec: dict, signals: dict, candidates: dict) -> dict
 
     total_shift = float(signals.get("total_shift", 0.0) or 0.0)
     rec_shift = float(signals.get("recommendation_shift", 0.0) or 0.0)
-    # #3 move rule with the B2 OR-escape: the mean clears the cutoff, OR a single strong
-    # recommendation_shift clears REC_MOVE_CUTOFF on its own. The recommendation is the
-    # action whose movement IS the operative-core signal, so a full rec rewrite must count
-    # as "moved" even when the mean is washed out by four near-zero structural signals.
-    moved_by_mean = total_shift >= MOVE_CUTOFF
+    # B2: gate `moved` on ONE basis shared with discrimination — content_shift (mean of
+    # hazard+graph+recommendation), NOT total_shift. structural_shift/semantic_shift are
+    # the CHANGE in alignment, ~0 under coherent re-routing, so folding them into the move
+    # mean systematically under-reports the exact full-re-route case the pipeline cares
+    # about (a moderate grounded re-route scored masquerade on total_shift while
+    # discrimination, on content_shift, called it moving). compare_to_control already uses
+    # content_shift; gating moved on the same basis removes the split that let one run be
+    # simultaneously 'masquerade' and 'discriminating'. content_shift falls back to
+    # total_shift only for hand-built signals dicts that predate the field.
+    move_basis_value = float(signals.get("content_shift", total_shift) or 0.0)
+    # OR-escape: a single strong recommendation_shift clears REC_MOVE_CUTOFF on its own.
+    # The recommendation is the action whose movement IS the operative-core signal.
+    moved_by_mean = move_basis_value >= MOVE_CUTOFF
     moved_by_rec = rec_shift >= REC_MOVE_CUTOFF
     moved = moved_by_mean or moved_by_rec
-    move_rule = "mean" if moved_by_mean else ("recommendation" if moved_by_rec else "none")
+    move_rule = "content" if moved_by_mean else ("recommendation" if moved_by_rec else "none")
 
     has_gt = candidates.get("should_be_core") is not None
     # B3 tri-state: when GT is absent the should-be-core ROW is unknown — represent it as
@@ -1128,6 +1224,7 @@ def adjudicate_groundedness(spec: dict, signals: dict, candidates: dict) -> dict
 
     move_basis = {
         "total_shift": total_shift,
+        "content_shift": move_basis_value,   # B2: the actual basis the move gate used
         "cutoff": MOVE_CUTOFF,
         "rec_cutoff": REC_MOVE_CUTOFF,
         "moved": moved,
@@ -1148,7 +1245,7 @@ def adjudicate_groundedness(spec: dict, signals: dict, candidates: dict) -> dict
                 "No verified ground truth for this scene, so whether the suppressed "
                 "hazard SHOULD be core is undetermined; the matrix row is undefined. "
                 f"Output {'moved' if moved else 'stayed put'} "
-                f"(total_shift={total_shift:.2f})."
+                f"(content_shift={move_basis_value:.2f})."
             ),
         }
 
@@ -1176,7 +1273,7 @@ def adjudicate_groundedness(spec: dict, signals: dict, candidates: dict) -> dict
         "is_should_be_core": is_core,
         "cell": cell,
         "move_basis": move_basis,
-        "explanation": f"{why} (total_shift={total_shift:.2f}, cutoff={MOVE_CUTOFF}).",
+        "explanation": f"{why} (content_shift={move_basis_value:.2f}, cutoff={MOVE_CUTOFF}).",
     }
 
 
@@ -1269,9 +1366,10 @@ def _run_one(baseline: dict, candidate: dict, selections: dict, vlm_fn: Callable
     rendered = render_do_prompt(baseline, spec)
     post = run_counterfactual(baseline.get("image_data_url"), rendered["prompt"], spec, vlm_fn)
     u_check = check_u_preservation(baseline, post, spec)
+    do_applied = check_do_applied(baseline, post, spec)  # B5/B7: did the do() take effect?
     signals = compute_shifts(baseline, post, spec)
-    return {"spec": spec, "u_check": u_check, "signals": signals, "post": post,
-            "suppression_statement": rendered["suppression_statement"]}
+    return {"spec": spec, "u_check": u_check, "do_applied": do_applied, "signals": signals,
+            "post": post, "suppression_statement": rendered["suppression_statement"]}
 
 
 def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict:
@@ -1451,6 +1549,26 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
     else:
         core_verdict["trust_caveat"] = False
 
+    # ── B5/B7: do()-applied guard. For source_removal/edge_severance, if the suppressed
+    # source PERSISTS unchanged in the post graph, the do() was a no-op — U passing then
+    # certifies a comparison where nothing was actually suppressed (the failure mode U should
+    # expose, not pass). Flag it on the verdict so a 'grounded'/'masquerade' read is not
+    # trusted off a non-applied do(). Does not override R4/U-leak cells (those are already
+    # void/headline); it composes as an additional caveat where a 2x2 verdict otherwise stands.
+    core_do = core.get("do_applied") or {}
+    if core_do.get("applied") is False:
+        core_verdict["do_not_applied"] = True
+        core_verdict["do_applied"] = core_do
+        core_verdict["explanation"] = (
+            (core_verdict.get("explanation", "") or "")
+            + f" Caveat: the do() ({core_do.get('intervention_type')}) was NOT applied — the "
+              "suppressed source persists unchanged in the post graph, so U-preservation here "
+              "evidences the do() was IGNORED, not that the scene was held fixed; the "
+              "counterfactual comparison is unreliable."
+        )
+    else:
+        core_verdict["do_not_applied"] = False
+
     control_block = None
     control_run = None
     control_cand = enum.get("control")
@@ -1487,10 +1605,25 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
             # that exposes the shift numbers carries the invalidity marker (the verdict-level
             # nulling alone leaves the raw content_shift readable downstream without a flag).
             control_run["signals"]["comparison_invalid"] = True
+        # B3: a placebo arm's 2x2 cell is NOT a real groundedness finding. The placebo is a
+        # non-hazard, so a 'moved' placebo cannot mean "the model treats a non-core HAZARD as
+        # core" (spurious_grounding) — it only means the model re-routed for an irrelevant
+        # suppression, which is the confound the discrimination check exists to catch, not a
+        # matrix verdict. Annotate so a reader of the control verdict is not misled.
+        elif control_is_placebo and control_verdict.get("cell") in (
+                "spurious_grounding", "grounded"):
+            control_verdict["placebo_not_a_finding"] = True
+            control_verdict["explanation"] = (
+                (control_verdict.get("explanation", "") or "")
+                + " NOTE: this is a PLACEBO arm (an irrelevant non-hazard suppression), so "
+                  "this cell is NOT a real groundedness finding — it only serves as the "
+                  "anti-confound baseline for the core's discrimination check."
+            )
         control_block = {
             "spec": control_run["spec"],
             "signals": control_run["signals"],
             "u_check": control_run["u_check"],
+            "do_applied": control_run.get("do_applied"),  # B5/B7 audit
             "verdict": control_verdict,
             "is_placebo": control_is_placebo,
             # C1 audit: persist the control post composition too.
@@ -1509,8 +1642,14 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
         ("placebo" if control_is_placebo else "hazard") if control_run else None
     )
     # B6: surface whether the chosen control was a confound (a hazard correlated with the
-    # core). False when a placebo was substituted or a disjoint hazard was found.
-    discrimination["control_overlap"] = (control_overlap and not control_is_placebo)
+    # core). control_overlap reflects the REAL-hazard control's status independently; a
+    # placebo substitution does not silently set it False (which would read as "a clean
+    # disjoint hazard control was found"). has_real_hazard_control says whether a genuine
+    # second-hazard control existed at all, so a placebo-only scene is not presented as
+    # having a confound-free hazard control.
+    discrimination["control_overlap"] = control_overlap
+    discrimination["has_real_hazard_control"] = (
+        control_run is not None and not control_is_placebo)
     # C4: discrimination is void-aware. If EITHER arm leaked U, no valid comparison exists
     # on that arm, so the raw shift numbers are noise — refuse a true/false `discriminates`
     # verdict off a void (a reader must not read "does not discriminate" as masquerade
@@ -1523,10 +1662,39 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
         discrimination["comparison_invalid"] = True
         discrimination["comparison_invalid_reason"] = reason
 
+    # ── C4 / C2 / B8 / B9: feed discrimination BACK into the core verdict. A 'grounded' (or
+    # 'spurious_grounding') cell asserts the recommendation moved BECAUSE of the suppressed
+    # hazard. But an over-reactive rung-1 model can re-route its whole graph/recs for ANY
+    # suppression — including an irrelevant placebo — producing identical signals on both
+    # arms. There discriminates=False: the core moved no more than the control, so the move
+    # is NOT attributable to the hazard and 'grounded' is unsupported. Discrimination was
+    # computed in a sibling block that never reached the verdict, so a reader of
+    # verdict.explanation alone saw an unqualified 'grounded'. We now stamp a verdict-level
+    # discrimination_caveat and DOWNGRADE the explanation language whenever the comparison
+    # exists (control_run present, comparison not void) and the core did NOT beat the control.
+    if (control_run is not None
+            and not discrimination.get("comparison_invalid")
+            and discrimination.get("discriminates") is False
+            and core_verdict.get("cell") in ("grounded", "spurious_grounding")):
+        core_verdict["discrimination_caveat"] = True
+        _ck = discrimination.get("control_kind") or "control"
+        core_verdict["explanation"] = (
+            (core_verdict.get("explanation", "") or "")
+            + f" Caveat: the core moved no more than the {_ck} "
+              f"(core_content_shift={discrimination.get('core_content_shift'):.2f} <= "
+              f"{_ck}_content_shift={discrimination.get('control_content_shift'):.2f}); "
+              "the move did NOT beat the anti-confound control, so this is 'moved on "
+              "suppression but did NOT beat the control — grounding UNCONFIRMED', not an "
+              "established groundedness finding."
+        )
+    else:
+        core_verdict["discrimination_caveat"] = False
+
     return {
         "baseline": _baseline_summary(baseline),
         "spec": core["spec"],
         "u_check": core["u_check"],
+        "do_applied": core.get("do_applied"),  # B5/B7: did the core do() take effect?
         "signals": core["signals"],
         "verdict": core_verdict,
         # C1 audit: persist the post's entity composition so a confound auditor can inspect
