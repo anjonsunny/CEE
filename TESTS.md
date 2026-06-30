@@ -914,6 +914,37 @@ Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/sha
 
 ---
 
+## Section I — Intervention pipeline (Layer 2, Stage 1; `intervention.py`)
+
+The counterfactual suppression pipeline that adjudicates *operative core* (does the
+recommendation move when the hazard is suppressed?). Built via the agentic reflection
+workflow; `tests/test_intervention.py` (33 tests) is the hermetic eval-for-code. See
+`INTERVENTION_PLAN.md` + `INTERVENTION_WORKFLOW.md`.
+
+### I1 — Step spine invariants
+- **What:** per-function invariants for the 10 pipeline steps. `intervention_baseline` LOADS gt_graph by filename (not passthrough), carries image_data_url, maps disaster_level→hazard_level; `enumerate_candidates` cores present, ranking deterministic, should_be_core None without GT, control None with one hazard; `build_intervention_spec` type auto-maps by hazard_class, explicit type overrides; `render_do_prompt` contains target+action verb; `run_counterfactual` calls injected vlm_fn and returns the light post; `check_u_preservation` Jaccard + leaked at U_CUTOFF; `compute_shifts` identical→all 0, all in [0,1], total_shift = mean of 5.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### I2 — The 2x2 groundedness oracle (+ no-GT)
+- **What:** hand-built baseline+post, no VLM. (should-be-core × moved) → {masquerade, grounded, correctly_ignored, spurious_grounding}; no GT → not_adjudicable. Locks the verdict logic without circularity.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### I3 — Reflection-pass fixes (the agentic loop caught these in v1)
+- **What:** four capabilities the reflection loop added/fixed and locked:
+  - **GT→model resolution (A1/B5):** should_be_core resolves the GT core to the model-side id via LABEL_HIERARCHY (`water_1`→`flood_1`); the do()-prompt never carries a GT-only id (no answer-key leak). `test_should_be_core_is_model_side_id_not_gt_only`, `test_render_do_prompt_does_not_leak_gt_specific_content`.
+  - **Structural recommendation_shift (B1):** `_rec_signature` excludes the raw action verb; a reworded-but-same rec → recommendation_shift 0. `test_recommendation_shift_zero_on_rewording_same_rec`.
+  - **Move rule = all-shifts OR strong-rec (B2):** `moved = total_shift >= MOVE_CUTOFF (0.3) OR recommendation_shift >= REC_MOVE_CUTOFF (0.5)`, so a strong rec rewrite alone counts. `test_strong_rec_shift_alone_counts_as_moved`.
+  - **U-leak voids the verdict (B7):** a leaked run (U Jaccard < cutoff) overrides to `cell="u_leaked"`, `comparison_invalid=True` (U-preservation actually guards the causal claim). `test_u_leak_voids_verdict`.
+  - **Disjoint control (B6):** control prefers a target-disjoint hazard. `test_control_prefers_target_disjoint_hazard`.
+- **Why:** demonstrates the reflection loop's value — independent test-author + adversarial critics caught a GT-id leak, wording-based shift, and a cosmetic U-guard that a single-agent build would have shipped.
+- **Severity:** BLOCKING. **Status:** auto.
+
+### I4 — Deferred / to confirm in loop step 2 (live)
+- **A6 (open):** the `compare_graphs` reuse path (lazy `import main`) is NOT exercised hermetically (import main raises in the test env); must confirm it runs in the live push_06 pass.
+- Experiment-eval (Section C: U held, discrimination, trust qualifies, interpretability) is validated on the live run, not in this hermetic suite.
+
+---
+
 ## How to use this spec
 
 ### After any schema-rule change
