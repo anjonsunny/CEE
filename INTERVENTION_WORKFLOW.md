@@ -1,10 +1,25 @@
 # CEE+ Intervention — Agentic Workflow Spec (contract + prompts)
 
 Executable companion to `INTERVENTION_PLAN.md`. The workflow master (a deterministic
-script) runs: Phase 0 contract (frozen below) -> Phase 1 BUILD (Builder + Test-author,
-parallel, independent) -> Phase 2 RUN (pytest, hermetic) -> Phase 3 REFLECT (3 critics,
-parallel) -> Phase 4 SYNTHESIZE + REFINE (Refiner). Workers are LLM agents; everything
-else is plain code.
+script) runs the FULL reflection loop, hermetic AND live, as one orchestration:
+
+```
+Phase 0 CONTRACT (frozen below)
+Phase 1 BUILD            Builder + Test-author, parallel, independent
+Phase 2 RUN              pytest (hermetic eval-for-code)
+Phase 3 REFLECT          3 critics score Sections A/B of the rubric
+Phase 4 REFINE           Refiner applies accepted findings
+Phase 5 LIVE             run the live experiment driver (push_06 + control) via the real VLM
+Phase 6 REFLECT-ON-LIVE  critics score Section C + any code/measure bug the live output exposes
+                         (U leak, id instability, role mislabel, core-not-declared, ...)
+Phase 7 REFINE-FROM-LIVE Refiner applies live-surfaced findings
+Phase 8 RE-VERIFY        re-run pytest, then re-run the live driver to confirm the fix
+```
+
+The live code output is a first-class eval input, alongside the hermetic tests and the
+rubric: ALL of them feed code refinement. The live run is NOT a separate manual step.
+Workers are LLM agents; orchestration is plain code. Phases 5-8 need Ollama
+(`qwen2.5vl:7b`); phases 1-4 are hermetic.
 
 ---
 

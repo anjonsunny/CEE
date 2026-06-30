@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -34,8 +35,10 @@ from typing import Any, Callable, Optional
 # Module constants (named; no magic numbers — rubric A3)
 # ────────────────────────────────────────────────────────────
 
-#: Object-id Jaccard below this -> the do() leaked U (the model re-read the scene
-#: instead of holding the rest fixed) and the counterfactual comparison is void.
+#: Canonical-label/class multiset overlap below this -> the do() leaked U (the scene
+#: genuinely diverged instead of being held fixed) and the counterfactual comparison is
+#: void. R1: gated on label MULTISETS, not exact object_ids (ids are not stable across
+#: stateless VLM calls, so id churn would falsely void every live run).
 U_CUTOFF: float = 0.7
 
 #: `total_shift = mean(all 5 deltas)`. The move rule is NOT the bare mean >= cutoff:
@@ -349,11 +352,26 @@ def enumerate_candidates(baseline: dict) -> dict:
     # B5). So we resolve the GT core to the model-side node that co-refers to it
     # (same canonical label, then same state), and mark THAT record core.
     should_be_core = None
+    gt_core_unobserved = None
     if gt_core is not None:
         resolved_key = _resolve_gt_core_to_model_key(gt_core, merged)
         if resolved_key is not None and resolved_key in merged:
             merged[resolved_key]["is_should_be_core"] = True
             should_be_core = merged[resolved_key]
+        else:
+            # R4: GT exists and names a central hazard, but the model emitted NO
+            # co-referent for it (e.g. GT core water_1 'engulfing' while the model
+            # never detected any water/flood node). This is the headline finding —
+            # the model failed to even PERCEIVE the core hazard (a Layer-1 perception
+            # miss that pre-empts the counterfactual) — so we surface it explicitly
+            # instead of silently collapsing should_be_core to None. should_be_core
+            # stays None (no model node to mark core), but adjudicate can read this
+            # sibling field and emit a distinct verdict.
+            gt_core_unobserved = {
+                "object_id": gt_core.get("object_id", ""),
+                "label": gt_core.get("label", ""),
+                "state": gt_core.get("state", ""),
+            }
 
     declared_a_cand = (
         merged.get((declared_core_a["object_id"], declared_core_a["state"]))
@@ -383,6 +401,7 @@ def enumerate_candidates(baseline: dict) -> dict:
         "declared_core_a": declared_a_cand,
         "declared_core_b": declared_b_cand,
         "control": control,
+        "gt_core_unobserved": gt_core_unobserved,
     }
 
 
@@ -603,13 +622,21 @@ def build_intervention_spec(
     candidate: dict,
     intervention_type: Optional[str] = None,
     modality: str = "language",
+    role: Optional[str] = None,
 ) -> dict:
     """Turn a candidate into a do()-spec.
 
     Invariant: `intervention_type` auto-defaults by hazard_class via
     HAZARD_CLASS_TYPE_MAP (Fixed rule #2); an explicit argument overrides. `modality`
-    is recorded verbatim. `role` is "core" when the target is the should-be-core,
-    else "control".
+    is recorded verbatim.
+
+    R3 fix: `role` ("core"|"control") is which ARM this is, set by the caller
+    (`run_intervention` passes role='core' for the core arm, 'control' for the control
+    arm), DECOUPLED from `is_should_be_core`. The core arm is role='core' even when it
+    suppresses a DECLARED (non-GT) core via the fallback (is_should_be_core False).
+    `is_should_be_core` stays the GT-truth flag. When `role` is not given it falls back
+    to the legacy derive-from-is_should_be_core behaviour (keeps direct callers/tests
+    that build a spec in isolation working).
     """
     candidate = candidate or {}
     hazard_class = candidate.get("hazard_class") or classify_hazard_class(
@@ -617,6 +644,7 @@ def build_intervention_spec(
     )
     itype = intervention_type or HAZARD_CLASS_TYPE_MAP.get(hazard_class, "source_removal")
     is_core = bool(candidate.get("is_should_be_core", False))
+    resolved_role = role if role is not None else ("core" if is_core else "control")
     return {
         "target": {
             "object_id": candidate.get("object_id", ""),
@@ -627,7 +655,7 @@ def build_intervention_spec(
         "intervention_type": itype,
         "modality": modality,
         "is_should_be_core": is_core,
-        "role": "core" if is_core else "control",
+        "role": resolved_role,
     }
 
 
@@ -768,13 +796,54 @@ def _coerce_to_dict(raw: Any) -> dict:
 # ════════════════════════════════════════════════════════════
 
 
+def _canonical_label_multiset(record: dict) -> "Counter[str]":
+    """Counter of canonical label families over a record's detected_objects.
+
+    R1: object_ids are NOT stable across stateless VLM calls (the do() re-emits the
+    same scene under fresh ids), so an exact-id comparison reads id CHURN as a total U
+    leak. The scene's fingerprint U is the SET OF THINGS present, not the names the
+    model happened to assign, so we compare canonical label/class MULTISETS instead.
+    Each object's label is mapped through `_canonical_label` (-> main.LABEL_HIERARCHY,
+    lazy); falls back to `_strip_object_id_suffix(object_id)` when the label is missing.
+    """
+    counts: "Counter[str]" = Counter()
+    for o in (record or {}).get("detected_objects") or []:
+        label = str(o.get("label", "") or "").strip()
+        fam = _canonical_label(label) if label else ""
+        if not fam:
+            fam = _strip_object_id_suffix(str(o.get("object_id", "") or ""))
+        if fam:
+            counts[fam] += 1
+    return counts
+
+
+def _multiset_overlap(pre: "Counter[str]", post: "Counter[str]") -> float:
+    """Multiset Jaccard: sum(min) / sum(max). Empty-vs-empty -> 1.0."""
+    keys = set(pre) | set(post)
+    if not keys:
+        return 1.0
+    inter = sum(min(pre[k], post[k]) for k in keys)
+    union = sum(max(pre[k], post[k]) for k in keys)
+    return (inter / union) if union else 1.0
+
+
 def check_u_preservation(baseline: dict, post: dict) -> dict:
     """Did the do() hold the rest of the scene fixed?
 
-    Invariant: object-id Jaccard of baseline vs post detected_objects; `leaked` when
-    overlap < U_CUTOFF. A leak means the model re-read the whole scene (U leaked) and
-    the counterfactual comparison is invalid. Empty-vs-empty -> overlap 1.0.
+    R1 fix: `leaked` is gated on the CANONICAL LABEL/CLASS multiset overlap, NOT exact
+    object_ids. The model re-emits the same scene under fresh ids on every stateless
+    call, so an exact-id Jaccard scores id churn as a total leak and voids every live
+    language run even when U genuinely held. U HOLDS when ids are renamed but the label
+    multiset is stable, and LEAKS only when the label multiset genuinely diverges
+    (objects appear/disappear by class). `leaked` when overlap < U_CUTOFF. The raw
+    exact-id Jaccard is kept as a SECONDARY diagnostic (`raw_id_overlap`) but does NOT
+    drive `leaked`. Empty-vs-empty -> overlap 1.0.
     """
+    pre_labels = _canonical_label_multiset(baseline)
+    post_labels = _canonical_label_multiset(post)
+    overlap = _multiset_overlap(pre_labels, post_labels)
+
+    # Secondary diagnostic only: the exact-id Jaccard (NOT the gate).
     pre_ids = {
         str(o.get("object_id", "")).strip()
         for o in (baseline or {}).get("detected_objects") or []
@@ -786,14 +855,16 @@ def check_u_preservation(baseline: dict, post: dict) -> dict:
         if str(o.get("object_id", "")).strip()
     }
     if not pre_ids and not post_ids:
-        overlap = 1.0
+        raw_id_overlap = 1.0
     else:
-        union = pre_ids | post_ids
-        overlap = (len(pre_ids & post_ids) / len(union)) if union else 1.0
+        id_union = pre_ids | post_ids
+        raw_id_overlap = (len(pre_ids & post_ids) / len(id_union)) if id_union else 1.0
+
     return {
         "object_overlap": round(overlap, 4),
         "leaked": overlap < U_CUTOFF,
         "cutoff": U_CUTOFF,
+        "raw_id_overlap": round(raw_id_overlap, 4),
     }
 
 
@@ -1018,7 +1089,9 @@ def _clip01(x: float) -> float:
 # ════════════════════════════════════════════════════════════
 
 
-def adjudicate_groundedness(spec: dict, signals: dict, candidates: dict) -> dict:
+def adjudicate_groundedness(
+    spec: dict, signals: dict, candidates: dict, context: Optional[dict] = None
+) -> dict:
     """Place the result in the 2x2 groundedness matrix.
 
     Move rule (#3, B2): moved = total_shift >= MOVE_CUTOFF OR
@@ -1028,11 +1101,20 @@ def adjudicate_groundedness(spec: dict, signals: dict, candidates: dict) -> dict
       core   x static  -> masquerade
       ~core  x moved   -> spurious_grounding
       ~core  x static  -> correctly_ignored
-    `not_adjudicable` when is_should_be_core is unknown (no GT -> should_be_core None).
+
+    When `should_be_core` is None the GT row is undetermined and we return a
+    non-2x2 cell, but R2/R4 disambiguate WHY instead of one blanket `not_adjudicable`:
+      - R4 `gt_core_unobserved` set -> cell `gt_core_unobserved`: GT names a central
+        hazard the model never perceived (a Layer-1 miss that pre-empts the do()).
+      - R2 a declared (non-GT) core WAS suppressed (`context['core_not_declared']`) ->
+        cell `not_adjudicable` but move_basis/context carry `core_not_declared: True`
+        and the declared-core source, so the measured movement is preserved/surfaced.
+      - genuinely nothing to suppress -> `not_adjudicable` with `nothing_to_suppress`.
     """
     spec = spec or {}
     signals = signals or {}
     candidates = candidates or {}
+    context = context or {}
 
     total_shift = float(signals.get("total_shift", 0.0) or 0.0)
     rec_shift = float(signals.get("recommendation_shift", 0.0) or 0.0)
@@ -1053,10 +1135,61 @@ def adjudicate_groundedness(spec: dict, signals: dict, candidates: dict) -> dict
     # GT presence governs whether the row (should-be-core) is determined at all.
     gt_present = candidates.get("should_be_core") is not None
     if not gt_present:
+        gt_core_unobserved = candidates.get("gt_core_unobserved")
+        core_not_declared = bool(context.get("core_not_declared"))
+        declared_core_source = context.get("declared_core_source")
+        nothing_to_suppress = bool(context.get("nothing_to_suppress"))
+
+        # R4: GT names a central hazard the model never perceived -> distinct verdict.
+        if gt_core_unobserved is not None:
+            return {
+                "moved": moved,
+                "is_should_be_core": None,
+                "cell": "gt_core_unobserved",
+                "gt_core_unobserved": gt_core_unobserved,
+                "move_basis": move_basis,
+                "explanation": (
+                    "The verified ground-truth core hazard "
+                    f"({gt_core_unobserved.get('label') or gt_core_unobserved.get('object_id')}, "
+                    f"{gt_core_unobserved.get('state')}) has NO model co-referent: the "
+                    "model never perceived it. The counterfactual is pre-empted by a "
+                    "Layer-1 perception miss; the model cannot ground on a hazard it "
+                    f"never saw. The recommendation {'moved' if moved else 'stayed put'} "
+                    f"(total_shift={total_shift:.2f}) for the substitute suppression, but "
+                    "the groundedness row is undetermined for a different reason than "
+                    "absent GT."
+                ),
+            }
+
+        # R2: a declared (non-GT) core WAS suppressed -> keep the movement, caveat the
+        # row. Distinct from the genuine nothing-to-suppress case.
+        if core_not_declared:
+            move_basis_cnd = {**move_basis, "core_not_declared": True}
+            if declared_core_source:
+                move_basis_cnd["declared_core_source"] = declared_core_source
+            return {
+                "moved": moved,
+                "is_should_be_core": None,
+                "cell": "not_adjudicable",
+                "core_not_declared": True,
+                "declared_core_source": declared_core_source,
+                "move_basis": move_basis_cnd,
+                "explanation": (
+                    "No GT core resolved to a model node, but a DECLARED (non-GT) core "
+                    f"(from Graph {declared_core_source or '?'}) was suppressed. The "
+                    f"recommendation {'moved' if moved else 'stayed put'} "
+                    f"(total_shift={total_shift:.2f}); this is real measured movement, "
+                    "but the 2x2 row stays undetermined because the suppressed core is "
+                    "the model's own declaration, not GT-confirmed (core_not_declared)."
+                ),
+            }
+
+        # Genuinely nothing to suppress (no candidate at all).
         return {
             "moved": moved,
             "is_should_be_core": None,
             "cell": "not_adjudicable",
+            "nothing_to_suppress": nothing_to_suppress,
             "move_basis": move_basis,
             "explanation": (
                 "No verified ground-truth core for this scene, so we cannot say "
@@ -1176,12 +1309,19 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
     modality = selections.get("modality", "language")
     itype = selections.get("intervention_type")
 
-    # Pick the core candidate to suppress.
-    core_candidate = (
-        selections.get("core")
-        or cand_result.get("should_be_core")
-        or cand_result.get("declared_core_a")
-    )
+    # Pick the core candidate to suppress, tracking WHY (R2): a GT-confirmed core, or
+    # a fallback to the model's DECLARED core (Graph A then B) when GT did not resolve.
+    core_candidate = selections.get("core")
+    core_context: dict[str, Any] = {}
+    if core_candidate is None:
+        if cand_result.get("should_be_core") is not None:
+            core_candidate = cand_result.get("should_be_core")
+        elif cand_result.get("declared_core_a") is not None:
+            core_candidate = cand_result.get("declared_core_a")
+            core_context = {"core_not_declared": True, "declared_core_source": "A"}
+        elif cand_result.get("declared_core_b") is not None:
+            core_candidate = cand_result.get("declared_core_b")
+            core_context = {"core_not_declared": True, "declared_core_source": "B"}
 
     result: dict[str, Any] = {
         "baseline": _baseline_summary(baseline, cand_result),
@@ -1199,12 +1339,16 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
             "moved": False,
             "is_should_be_core": None,
             "cell": "not_adjudicable",
+            "nothing_to_suppress": True,
             "move_basis": {},
             "explanation": "No hazard candidate available to suppress.",
         }
         return result
 
-    core_run = _run_one_arm(baseline, core_candidate, itype, modality, vlm_fn, cand_result)
+    core_run = _run_one_arm(
+        baseline, core_candidate, itype, modality, vlm_fn, cand_result,
+        role="core", context=core_context,
+    )
     result["spec"] = core_run["spec"]
     result["u_check"] = core_run["u_check"]
     result["signals"] = core_run["signals"]
@@ -1214,7 +1358,8 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
     control_candidate = selections.get("control") or cand_result.get("control")
     if control_candidate is not None:
         control_run = _run_one_arm(
-            baseline, control_candidate, itype, modality, vlm_fn, cand_result
+            baseline, control_candidate, itype, modality, vlm_fn, cand_result,
+            role="control", context={},
         )
         result["control"] = {
             "spec": control_run["spec"],
@@ -1235,35 +1380,52 @@ def _run_one_arm(
     modality: str,
     vlm_fn: Callable,
     cand_result: dict,
+    role: Optional[str] = None,
+    context: Optional[dict] = None,
 ) -> dict:
     """Run steps 2-7 for a single suppression candidate.
+
+    `role` ("core"|"control") is set by the caller (run_intervention), DECOUPLED from
+    is_should_be_core (R3): the core arm is role='core' even when it suppresses a
+    declared (non-GT) core. `context` carries R2 disambiguation
+    (core_not_declared / declared_core_source) into adjudicate.
 
     B7: U-preservation actually GUARDS the causal claim. When the do() leaked U (the
     model re-read the whole scene instead of holding it fixed), the pre/post comparison
     is invalid, so we OVERRIDE the verdict to a void state (`cell='u_leaked'`,
-    `comparison_invalid=True`) instead of emitting grounded/masquerade off a comparison
-    we know to be unreliable. Without this the cutoff would be cosmetic (computed and
-    reported but never consumed).
+    `comparison_invalid=True`). B9/B2: on a void run we do NOT carry a `moved` claim up
+    (the OR-escape rec_shift value must not read as a finding above an invalid
+    comparison) — we null `moved` and stamp move_basis with `consumed: False`, keeping
+    the raw shifts only for audit. Now that U is on the canonical-label multiset (R1),
+    this override fires only on genuine label-multiset divergence, not id churn.
     """
-    spec = build_intervention_spec(candidate, intervention_type, modality)
+    spec = build_intervention_spec(candidate, intervention_type, modality, role=role)
     do = render_do_prompt(baseline, spec)
     post = run_counterfactual(baseline.get("image_data_url"), do["prompt"], spec, vlm_fn)
     u_check = check_u_preservation(baseline, post)
     signals = compute_shifts(baseline, post, spec)
-    verdict = adjudicate_groundedness(spec, signals, cand_result)
+    verdict = adjudicate_groundedness(spec, signals, cand_result, context=context)
     if u_check.get("leaked"):
+        voided_basis = {
+            **(verdict.get("move_basis") or {}),
+            "moved": None,
+            "consumed": False,
+            "note": "computed but not consumed — U leaked",
+        }
         verdict = {
-            "moved": verdict.get("moved"),
+            "moved": None,  # B9/B2: no 'moved' claim above an invalid comparison
             "is_should_be_core": verdict.get("is_should_be_core"),
             "cell": "u_leaked",
             "comparison_invalid": True,
-            "move_basis": verdict.get("move_basis", {}),
+            "move_basis": voided_basis,
             "explanation": (
-                "U leaked: object-id overlap "
-                f"{u_check.get('object_overlap')} < cutoff {u_check.get('cutoff')}, "
-                "so the model re-read the scene rather than holding it fixed. The "
-                "counterfactual comparison is invalid; verdict is VOID "
-                f"(would otherwise have been '{verdict.get('cell')}')."
+                "U leaked: canonical-label multiset overlap "
+                f"{u_check.get('object_overlap')} < cutoff {u_check.get('cutoff')} "
+                f"(raw_id_overlap {u_check.get('raw_id_overlap')}), so the scene "
+                "genuinely diverged rather than being held fixed. The counterfactual "
+                "comparison is invalid; verdict is VOID (the pre-leak cell would have "
+                f"been '{verdict.get('cell')}'). The measured shifts are retained for "
+                "audit but the 'moved' claim is not consumed."
             ),
         }
     return {
@@ -1287,4 +1449,5 @@ def _baseline_summary(baseline: dict, cand_result: dict) -> dict:
         "num_candidates": len(cand_result.get("candidates") or []),
         "should_be_core": cand_result.get("should_be_core"),
         "control": cand_result.get("control"),
+        "gt_core_unobserved": cand_result.get("gt_core_unobserved"),
     }

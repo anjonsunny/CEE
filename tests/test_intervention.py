@@ -250,6 +250,19 @@ def test_spec_type_auto_defaults_by_hazard_class(hazard_class, expected_type):
     assert spec["modality"] == "language"  # recorded verbatim
 
 
+def test_spec_role_is_explicit_and_decoupled_from_is_should_be_core():
+    """R3: `role` is set by the caller per ARM, DECOUPLED from is_should_be_core.
+    A declared-but-not-GT core (is_should_be_core False) built with role='core' must be
+    role='core', NOT 'control'. is_should_be_core stays the separate GT-truth flag."""
+    declared_not_gt = {"object_id": "child_1", "state": "drowning", "label": "child",
+                       "hazard_class": "person_in_hazard", "sources": ["A"],
+                       "ranks": {"A": 1}, "is_should_be_core": False}
+    spec = intervention.build_intervention_spec(
+        declared_not_gt, intervention_type=None, modality="language", role="core")
+    assert spec["role"] == "core"               # the arm is the core arm
+    assert spec["is_should_be_core"] is False    # ...but it is NOT the GT core
+
+
 def test_spec_explicit_type_overrides_default():
     """An explicit intervention_type argument overrides the auto-default."""
     candidate = {"object_id": "x_1", "state": "engulfing", "label": "water",
@@ -327,29 +340,49 @@ def test_run_counterfactual_calls_vlm_and_returns_light_post(tmp_path):
 # ---------------------------------------------------------------------------
 # step 5 — check_u_preservation
 # ---------------------------------------------------------------------------
-def _baseline_post_pair(obj_ids_post):
-    baseline = {"detected_objects": [{"object_id": "a"}, {"object_id": "b"},
-                                     {"object_id": "c"}, {"object_id": "d"}]}
-    post = {"detected_objects": [{"object_id": x} for x in obj_ids_post]}
-    return baseline, post
+def _det(objs):
+    """objs = list of (object_id, label) -> detected_objects records."""
+    return {"detected_objects": [{"object_id": oid, "label": lab, "state": ""}
+                                 for oid, lab in objs]}
 
 
 def test_u_preserved_when_objects_stable():
-    """Identical object ids -> overlap 1.0 -> not leaked."""
-    baseline, post = _baseline_post_pair(["a", "b", "c", "d"])
+    """R1: U is gated on the canonical LABEL multiset, not exact ids. RENAMED ids with
+    a stable label multiset (baseline person/person/chair vs post man/woman/seat — same
+    canonical families) must NOT leak; overlap high, leaked False. The raw exact-id
+    Jaccard is reported as a secondary diagnostic but does NOT drive `leaked`."""
+    baseline = _det([("person_1", "person"), ("person_2", "person"), ("chair_1", "chair")])
+    post = _det([("man_7", "man"), ("woman_9", "woman"), ("seat_3", "chair")])
     u = intervention.check_u_preservation(baseline, post)
-    assert u["object_overlap"] == pytest.approx(1.0)
+    # man/woman canonicalize to person; chair/seat are the same class -> multiset stable.
+    assert u["object_overlap"] >= 0.7
     assert u["leaked"] is False
     assert u["cutoff"] == pytest.approx(0.7)  # U_CUTOFF
+    # secondary diagnostic present, and it is the (low) raw-id Jaccard — NOT the gate.
+    assert "raw_id_overlap" in u
+    assert u["raw_id_overlap"] < 0.7  # ids were fully renamed
+    assert u["leaked"] is False       # ...yet not leaked, because labels held
 
 
-def test_u_leaked_when_jaccard_below_cutoff():
-    """Jaccard < 0.7 -> leaked True (U not held; the comparison would be invalid).
-    baseline {a,b,c,d} vs post {a,w,x,y,z}: intersection 1, union 8 -> 0.125."""
-    baseline, post = _baseline_post_pair(["a", "w", "x", "y", "z"])
+def test_u_leaked_when_label_multiset_diverges():
+    """R1: U LEAKS only when the canonical-label multiset genuinely diverges (objects
+    appear/disappear by class). baseline {water,person} vs post {tree,rock}: zero
+    shared label families -> overlap 0 -> leaked True."""
+    baseline = _det([("flood_1", "water"), ("person_1", "person")])
+    post = _det([("tree_1", "tree"), ("rock_1", "rock")])
     u = intervention.check_u_preservation(baseline, post)
     assert u["object_overlap"] < 0.7
     assert u["leaked"] is True
+
+
+def test_u_identical_ids_and_labels_not_leaked():
+    """Sanity: identical ids AND labels -> overlap 1.0, leaked False, raw_id_overlap 1.0."""
+    baseline = _det([("flood_1", "water"), ("person_1", "person")])
+    post = _det([("flood_1", "water"), ("person_1", "person")])
+    u = intervention.check_u_preservation(baseline, post)
+    assert u["object_overlap"] == pytest.approx(1.0)
+    assert u["leaked"] is False
+    assert u["raw_id_overlap"] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +595,168 @@ def test_run_intervention_end_to_end_hermetic(tmp_path):
         assert key in out, f"run_intervention output missing {key}"
     # JSON-serializable (A2): must not raise.
     json.dumps(out)
+
+
+# ---------------------------------------------------------------------------
+# R4 — GT core with NO model co-referent surfaces gt_core_unobserved (push_06)
+# ---------------------------------------------------------------------------
+def _push06_like_result():
+    """push_06-shaped: GT core is `water` (engulfing) but the model NEVER detects any
+    water/flood node — it only sees the drowning person + a chair. The GT core has no
+    model co-referent, the headline finding."""
+    return {
+        "run_id": "run_push06",
+        "image_filename": "push_06_drowning_pool.jpg",
+        "prompt": "analyze",
+        "caption": "a pool scene",
+        "disaster_level": 8,
+        "detected_objects": [
+            {"object_id": "child_1", "label": "child", "state": "drowning"},
+            {"object_id": "person_2", "label": "person", "state": "fleeing"},
+            {"object_id": "chair_1", "label": "chair", "state": "stationary"},
+        ],
+        "recommendations": [
+            {"rank": 1, "action": "Rescue child_1.", "threat": "child_1",
+             "state": "drowning", "related_object_ids": ["child_1"],
+             "affected_objects": ["child_1"]},
+        ],
+        "causal_graph": {
+            "nodes": [
+                {"id": "child_1", "label": "child", "state": "drowning", "hazardous": True},
+                {"id": "person_2", "label": "person", "state": "fleeing", "hazardous": False},
+            ],
+            "edges": [
+                {"source": "child_1", "target": "person_2", "effect": "may_harm", "via_state": "drowning"},
+            ],
+            "intervention_candidates": [
+                {"threat": "child_1", "state": "drowning", "outgoing_edge_count": 1},
+            ],
+        },
+        "graph_b": {
+            "nodes": [
+                {"id": "person_1", "label": "person", "state": "drowning", "hazardous": True},
+            ],
+            "edges": [],
+            "suppression_pick": {"threat": "person_1", "state": "drowning", "reason": "victim"},
+        },
+    }
+
+
+def test_gt_core_unobserved_when_model_has_no_coreferent(tmp_path):
+    """R4: GT core (water_1/engulfing) has no model co-referent -> enumerate surfaces
+    `gt_core_unobserved` and should_be_core stays None (not silently nulled)."""
+    gt_dir = write_gt_dir(tmp_path)  # GT core = water_1 'engulfing'
+    baseline = intervention.intervention_baseline(
+        _push06_like_result(), image_data_url="data:img", gt_dir=gt_dir)
+    enum = intervention.enumerate_candidates(baseline)
+    assert enum["should_be_core"] is None
+    assert enum["gt_core_unobserved"] is not None
+    assert enum["gt_core_unobserved"]["object_id"] == "water_1"
+    assert enum["gt_core_unobserved"]["state"] == "engulfing"
+
+
+def test_gt_core_unobserved_verdict_is_distinct(tmp_path):
+    """R4: adjudicate emits the distinct `gt_core_unobserved` cell, NOT bare
+    not_adjudicable, when GT names a core the model never perceived."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(
+        _push06_like_result(), image_data_url="data:img", gt_dir=gt_dir)
+    # static post (model ignores the do) — cell must still report the perception miss.
+    raw_post = {
+        "detected_objects": _push06_like_result()["detected_objects"],
+        "causal_graph": _push06_like_result()["causal_graph"],
+        "recommendations": _push06_like_result()["recommendations"],
+        "disaster_level": 8,
+    }
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    assert out["verdict"]["cell"] == "gt_core_unobserved"
+    assert out["spec"]["role"] == "core"  # R3: the arm that ran is the core arm
+    json.dumps(out)  # JSON-serializable
+
+
+# ---------------------------------------------------------------------------
+# R2 — declared (non-GT) core suppressed -> core_not_declared, not bare null
+# ---------------------------------------------------------------------------
+def test_core_not_declared_when_no_gt_but_declared_core_runs(tmp_path):
+    """R2: no GT file at all, but the model declares a core. The core arm STILL runs
+    (fallback to declared_core_a), the verdict carries core_not_declared=True with the
+    declared-core source, and movement is preserved — NOT a blanket not_adjudicable."""
+    gt_dir = write_gt_dir(tmp_path)
+    result = make_result(image_filename="no_gt_for_this.jpg")  # no GT -> should_be_core None
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir)
+    # A MOVED post (recs fully retargeted) so we can confirm movement is preserved.
+    raw_post = {
+        "detected_objects": result["detected_objects"],
+        "causal_graph": {"nodes": [], "edges": [], "intervention_candidates": []},
+        "recommendations": [],
+        "disaster_level": 0,
+    }
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    v = out["verdict"]
+    assert v["cell"] == "not_adjudicable"
+    assert v.get("core_not_declared") is True
+    assert v.get("declared_core_source") == "A"
+    assert out["spec"]["role"] == "core"            # R3: arm is core even w/o GT
+    assert out["spec"]["is_should_be_core"] is False  # ...but not GT-confirmed
+    # movement preserved on the move_basis (not thrown away)
+    assert "total_shift" in v["move_basis"]
+
+
+def test_nothing_to_suppress_is_distinct_from_core_not_declared():
+    """R2: the genuine empty case (no candidate at all) -> not_adjudicable with
+    nothing_to_suppress, distinguishable from the core_not_declared path."""
+    baseline = {"image_filename": "x", "detected_objects": [], "graph_a": {},
+                "graph_b": {}, "gt_graph": None, "recommendations": [], "hazard_level": 0}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub({}))
+    v = out["verdict"]
+    assert v["cell"] == "not_adjudicable"
+    assert v.get("nothing_to_suppress") is True
+    assert v.get("core_not_declared") in (None, False)
+
+
+# ---------------------------------------------------------------------------
+# B7/B9 — U-leak void nulls the 'moved' claim (renamed-id-but-same-label NOT leaked)
+# ---------------------------------------------------------------------------
+def test_renamed_ids_same_labels_not_overridden_to_u_leaked(tmp_path):
+    """B7 regression (post-R1): a post that RENAMES every id but keeps the same label
+    multiset must NOT be voided as u_leaked — U held. The verdict surfaces the real
+    result, not a spurious void."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    # baseline labels: water + person. Post keeps SAME labels under renamed ids.
+    raw_post = {
+        "detected_objects": [{"object_id": "flood_99", "label": "water", "state": "engulfing"},
+                             {"object_id": "swimmer_42", "label": "person", "state": "wading"}],
+        "causal_graph": make_result()["causal_graph"],
+        "recommendations": make_result()["recommendations"],
+        "disaster_level": 8,
+    }
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(raw_post))
+    assert out["u_check"]["leaked"] is False
+    assert out["verdict"]["cell"] != "u_leaked"
+
+
+def test_u_leak_void_nulls_moved_claim(tmp_path):
+    """B9/B2: on a void (u_leaked) run, `moved` is NOT presented as a finding — it is
+    nulled and move_basis is marked not-consumed, even if a strong rec shift would have
+    fired the OR-escape."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    # label multiset genuinely diverges -> U leaks; recs fully retargeted (would-move).
+    leaked_post = {
+        "detected_objects": [{"object_id": "t_1", "label": "tree", "state": "x"},
+                             {"object_id": "r_1", "label": "rock", "state": "y"}],
+        "causal_graph": {"nodes": [], "edges": []},
+        "recommendations": [{"rank": 1, "action": "Z", "threat": "t_1", "state": "x",
+                             "related_object_ids": ["t_1"], "affected_objects": ["t_1"]}],
+        "disaster_level": 0,
+    }
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(leaked_post))
+    assert out["u_check"]["leaked"] is True
+    v = out["verdict"]
+    assert v["cell"] == "u_leaked"
+    assert v["moved"] is None                       # no 'moved' claim above void
+    assert v["move_basis"].get("consumed") is False  # raw shift kept for audit only
 
 
 def test_intervention_module_has_named_constants():
