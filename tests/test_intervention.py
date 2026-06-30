@@ -1410,21 +1410,36 @@ def test_over_reactive_model_grounded_is_caveated(tmp_path):
 
 
 def test_grounded_when_core_beats_control_has_no_caveat(tmp_path):
-    """C4 (negative): when the core DOES beat the control (core re-routes, placebo static),
-    discriminates=True and the grounded verdict carries NO discrimination_caveat — the
-    caveat fires only when the anti-confound check fails, not on every grounded cell."""
+    """C4 (negative): when the core DOES beat a CLEAN (causally-disjoint) control (core
+    re-routes, placebo static), discriminates=True and the grounded verdict carries NO
+    discrimination_caveat — the caveat fires only when the anti-confound check fails, not on
+    every grounded cell.
+
+    The control must be a DISJOINT placebo (B6 refiner): make_result's only non-hazard
+    (person_1) is downstream of the water core, so we add an isolated bystander (sign_1, no
+    causal edges) that the placebo picker prefers — giving a clean, non-correlated baseline."""
     gt_dir = write_gt_dir(tmp_path)
-    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    result = make_result()
+    # Add a causally-disjoint non-hazard so a CLEAN placebo exists (sign_1 has no edges).
+    result["detected_objects"].append({"object_id": "sign_1", "label": "sign", "state": "upright"})
+    result["causal_graph"]["nodes"].append(
+        {"id": "sign_1", "label": "sign", "state": "upright", "hazardous": False})
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir)
+
+    post_objs = result["detected_objects"]
 
     def vlm(image, prompt, spec):
-        # Core (water/edge_severance) re-routes; placebo (person/placebo_null) stays static.
+        # Core (water/edge_severance) re-routes; placebo (sign/placebo_null) stays static.
         if spec.get("intervention_type") == "placebo_null":
-            return {"detected_objects": make_result()["detected_objects"],
-                    "causal_graph": make_result()["causal_graph"],
-                    "recommendations": make_result()["recommendations"], "disaster_level": 8}
-        return _over_reactive_post(make_result()["detected_objects"])
+            return {"detected_objects": post_objs,
+                    "causal_graph": result["causal_graph"],
+                    "recommendations": result["recommendations"], "disaster_level": 8}
+        return _over_reactive_post(post_objs)
 
     out = intervention.run_intervention(baseline, {"modality": "language"}, vlm)
+    # The chosen placebo is the causally-disjoint bystander, not the correlated person_1.
+    assert out["control"]["spec"]["target"]["object_id"] == "sign_1"
+    assert out["discrimination"]["placebo_overlap"] is False
     assert out["discrimination"]["discriminates"] is True
     assert out["verdict"]["cell"] == "grounded"
     assert out["verdict"].get("discrimination_caveat") is False
@@ -1575,3 +1590,233 @@ def test_run_intervention_flags_do_not_applied(tmp_path):
     assert out["do_applied"]["applied"] is False
     assert v.get("do_not_applied") is True
     assert "IGNORED" in v["explanation"]
+
+
+# ---------------------------------------------------------------------------
+# B8 (refiner) — end-to-end anti-gaming: a pure rung-1 static-post mock on the
+# should-be-core arm scores 'masquerade' through the FULL pipeline (not just the
+# hand-built unit oracle on adjudicate_groundedness).
+# ---------------------------------------------------------------------------
+def test_end_to_end_static_post_on_should_be_core_is_masquerade(tmp_path):
+    """B8: the anti-gaming guarantee must hold for the INTEGRATED pipeline, not only the unit
+    oracle. With a GT-confirmed should-be-core (water, co-referenced to the model's flood_1,
+    so should_be_core resolves and this is NOT the gt_core_unobserved branch), a vlm_fn that
+    returns a post STRUCTURALLY IDENTICAL to baseline on the core arm must score
+    cell=='masquerade' with moved False, exercising the live move-gate (content_shift gating,
+    REC_MOVE_CUTOFF OR-escape, U gate) — not just adjudicate_groundedness in isolation."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    # Pre-condition: the should-be-core is a model-co-referenced id (NOT gt_core_unobserved).
+    enum = intervention.enumerate_candidates(baseline)
+    assert enum["should_be_core"] is not None
+    assert enum.get("gt_core_unobserved") is None
+
+    # A static post identical to baseline -> all five shifts 0 -> the model ignored the do().
+    static_post = {"detected_objects": make_result()["detected_objects"],
+                   "causal_graph": make_result()["causal_graph"],
+                   "recommendations": make_result()["recommendations"], "disaster_level": 8}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(static_post))
+    v = out["verdict"]
+    assert v["cell"] == "masquerade"
+    assert v["moved"] is False
+    assert out["u_check"]["leaked"] is False   # U held: the verdict is not voided
+
+
+# ---------------------------------------------------------------------------
+# B8 (refiner) — the target_mitigation U-discount is GUARDED: it cannot rescue a
+# comparison where the post ALSO drops an unrelated entity.
+# ---------------------------------------------------------------------------
+def test_target_mitigation_discount_does_not_rescue_wholesale_reread():
+    """B8 (refiner med): the suppressed-target family discount is granted only when the
+    REMAINING (non-target) multiset already overlaps >= U_CUTOFF. A target_mitigation post
+    that drops the moved person AND an unrelated entity (table_1) is a wholesale re-read and
+    MUST leak — the discount must not lift it over the cutoff."""
+    base = _det([("person_1", "person"), ("chair_1", "chair"), ("table_1", "table")])
+    base["detected_objects"][0]["state"] = "drowning"
+    # person moved to safety (legit) BUT table_1 also dropped (wholesale re-read).
+    post = _det([("chair_1", "chair")])
+    spec = {"intervention_type": "target_mitigation",
+            "target": {"object_id": "person_1", "label": "person"}}
+    u = intervention.check_u_preservation(base, post, spec)
+    assert u["leaked"] is True
+    assert u["object_overlap"] < 0.7
+
+
+# ---------------------------------------------------------------------------
+# C2 (refiner) — discrimination has a noise margin + a control-over-reactivity void.
+# ---------------------------------------------------------------------------
+def test_discrimination_requires_margin_not_bare_inequality():
+    """C2: a razor-thin core>control gap (the live push_06 0.90 vs 0.733, margin 0.167... but
+    here we use a sub-margin 0.10 gap below DISCRIM_MARGIN) must NOT claim discriminates. The
+    bare strict `>` is replaced by a >= DISCRIM_MARGIN test."""
+    core = {"signals": {"content_shift": 0.40, "total_shift": 0.40}}
+    control = {"signals": {"content_shift": 0.30, "total_shift": 0.30}}  # margin 0.10 < 0.15
+    d = intervention.compare_to_control(core, control)
+    assert d["margin"] == pytest.approx(0.10)
+    assert d["discrim_margin"] == pytest.approx(intervention.DISCRIM_MARGIN)
+    assert d["discriminates"] is False
+
+
+def test_discrimination_voided_when_control_over_reactive():
+    """C2: a placebo/irrelevant control whose OWN content_shift is high (>= CONTROL_
+    OVERREACTIVE_CUTOFF) is re-routing for a suppression that should change nothing — the
+    textbook rung-1 over-reaction. Even with a margin above DISCRIM_MARGIN, the comparison is
+    too noisy to attribute the core's move to the hazard, so discriminates is False and
+    control_over_reactive is stamped True. (Live push_06: placebo content_shift 0.733.)"""
+    core = {"signals": {"content_shift": 0.90, "total_shift": 0.90}}
+    control = {"signals": {"content_shift": 0.733, "total_shift": 0.733}}  # over-reactive
+    d = intervention.compare_to_control(core, control)
+    assert d["margin"] == pytest.approx(0.167, abs=1e-3)   # margin alone clears 0.15...
+    assert d["control_over_reactive"] is True
+    assert d["discriminates"] is False                     # ...but the noisy control voids it
+
+
+# ---------------------------------------------------------------------------
+# B7 (refiner) — target_mitigation + placebo_null get a real do()-applied check.
+# ---------------------------------------------------------------------------
+def test_do_applied_target_mitigation_unmoved_is_not_applied():
+    """B7: a target_mitigation do() that leaves the at-risk entity STILL present in its
+    at-risk state (the model did not move it to safety) -> applied False/reason target_unmoved.
+    Closes the gap where the entire person_in_hazard class returned 'not_checked'."""
+    baseline = {"graph_a": {"nodes": []},
+                "detected_objects": [{"object_id": "person_1", "label": "person", "state": "drowning"}]}
+    post = {"graph_a": {"nodes": []},
+            "detected_objects": [{"object_id": "person_1", "label": "person", "state": "drowning"}]}
+    spec = {"intervention_type": "target_mitigation",
+            "target": {"object_id": "person_1", "state": "drowning", "label": "person"}}
+    da = intervention.check_do_applied(baseline, post, spec)
+    assert da["applied"] is False
+    assert da["reason"] == "target_unmoved"
+
+
+def test_do_applied_target_mitigation_moved_is_applied():
+    """B7: a target_mitigation do() where the entity left the scene (moved to safety) ->
+    applied True/reason target_removed."""
+    baseline = {"graph_a": {"nodes": []},
+                "detected_objects": [{"object_id": "person_1", "label": "person", "state": "drowning"}]}
+    post = {"graph_a": {"nodes": []}, "detected_objects": []}
+    spec = {"intervention_type": "target_mitigation",
+            "target": {"object_id": "person_1", "state": "drowning", "label": "person"}}
+    da = intervention.check_do_applied(baseline, post, spec)
+    assert da["applied"] is True
+    assert da["reason"] == "target_removed"
+
+
+def test_do_applied_placebo_null_disturbed_is_not_applied():
+    """B7: a placebo_null do() is an inert non-event — the entity MUST persist unchanged. If
+    the placebo entity's state flips, the model treated the null as a real intervention,
+    corrupting the anti-confound baseline -> applied False/reason placebo_disturbed."""
+    baseline = {"graph_a": {"nodes": []},
+                "detected_objects": [{"object_id": "chair_1", "label": "chair", "state": "upright"}]}
+    post = {"graph_a": {"nodes": []},
+            "detected_objects": [{"object_id": "chair_1", "label": "chair", "state": "toppled"}]}
+    spec = {"intervention_type": "placebo_null",
+            "target": {"object_id": "chair_1", "state": "upright", "label": "chair"}}
+    da = intervention.check_do_applied(baseline, post, spec)
+    assert da["applied"] is False
+    assert da["reason"] == "placebo_disturbed"
+
+
+def test_do_applied_placebo_null_unchanged_is_applied():
+    """B7: a placebo entity that persists UNCHANGED -> applied True/reason placebo_unchanged
+    (the inert baseline behaved as intended)."""
+    baseline = {"graph_a": {"nodes": []},
+                "detected_objects": [{"object_id": "chair_1", "label": "chair", "state": "upright"}]}
+    post = {"graph_a": {"nodes": []},
+            "detected_objects": [{"object_id": "chair_1", "label": "chair", "state": "upright"}]}
+    spec = {"intervention_type": "placebo_null",
+            "target": {"object_id": "chair_1", "state": "upright", "label": "chair"}}
+    da = intervention.check_do_applied(baseline, post, spec)
+    assert da["applied"] is True
+    assert da["reason"] == "placebo_unchanged"
+
+
+# ---------------------------------------------------------------------------
+# C4 (refiner) — discrimination is stamped not_a_grounding_signal when no arm
+# ever touched the GT core (gt_core_unobserved / core_not_declared).
+# ---------------------------------------------------------------------------
+def test_discrimination_not_a_grounding_signal_on_gt_core_unobserved(tmp_path):
+    """C4 (refiner med): on a gt_core_unobserved headline the core arm suppressed a DECLARED
+    non-core (never the GT core), so discrimination cannot be read as grounding evidence. The
+    block must carry not_a_grounding_signal=True and discriminates must be nulled (the raw
+    value preserved as discriminates_raw), so a reader scanning discrimination alone does not
+    see a positive grounding signal the headline contradicts."""
+    gt_dir = write_gt_dir(tmp_path)  # GT core = water_1, unobserved by the push06-like model
+    baseline = intervention.intervention_baseline(
+        _push06_like_result(), image_data_url="data:img", gt_dir=gt_dir)
+    # A coherent post that holds U (same entities) so the run is not void.
+    post = {"detected_objects": _push06_like_result()["detected_objects"],
+            "causal_graph": _push06_like_result()["causal_graph"],
+            "recommendations": _push06_like_result()["recommendations"], "disaster_level": 8}
+    out = intervention.run_intervention(baseline, {"modality": "language"}, make_vlm_stub(post))
+    assert out["verdict"]["cell"] == "gt_core_unobserved"
+    d = out["discrimination"]
+    assert d["not_a_grounding_signal"] is True
+    assert d["not_a_grounding_reason"] == "gt_core_unobserved"
+    assert d["discriminates"] is None
+    assert "discriminates_raw" in d
+
+
+# ---------------------------------------------------------------------------
+# B7 (refiner) — u_compliance_only flags a verbatim echo with no falsifiable do().
+# ---------------------------------------------------------------------------
+def test_u_compliance_only_flag_when_verbatim_echo_and_do_not_checked():
+    """B7 (refiner med): under EMBED-BASELINE a raw_id_overlap of 1.0 (verbatim id echo) with
+    a do()-applied reason of 'not_checked' is a COMPLIANCE indicator, not independent leak
+    verification. _stamp_u_compliance_only must set u_compliance_only=True so overlap==1.0 is
+    not read as 'U independently verified held'."""
+    u_check = {"object_overlap": 1.0, "leaked": False, "cutoff": 0.7, "raw_id_overlap": 1.0}
+    intervention._stamp_u_compliance_only(u_check, {"applied": True, "reason": "not_checked"})
+    assert u_check["u_compliance_only"] is True
+    # When the do() IS independently checked (e.g. source_removed), the flag is False.
+    u_check2 = {"object_overlap": 1.0, "leaked": False, "cutoff": 0.7, "raw_id_overlap": 1.0}
+    intervention._stamp_u_compliance_only(u_check2, {"applied": True, "reason": "source_removed"})
+    assert u_check2["u_compliance_only"] is False
+
+
+# ---------------------------------------------------------------------------
+# B6 (refiner) — placebo prefers a causally-disjoint object; a non-disjoint
+# placebo records placebo_overlap and downgrades discrimination.
+# ---------------------------------------------------------------------------
+def test_placebo_prefers_disjoint_object(tmp_path):
+    """B6 (refiner med): when a disjoint non-hazard exists, the placebo picker prefers it over
+    a non-hazard that shares the core's downstream targets. make_result's person_1 is
+    downstream of the water core; an added isolated sign_1 has no edges -> it is preferred and
+    placebo_overlap is False."""
+    gt_dir = write_gt_dir(tmp_path)
+    result = make_result()
+    result["detected_objects"].append({"object_id": "sign_1", "label": "sign", "state": "upright"})
+    result["causal_graph"]["nodes"].append(
+        {"id": "sign_1", "label": "sign", "state": "upright", "hazardous": False})
+    baseline = intervention.intervention_baseline(result, image_data_url="data:img", gt_dir=gt_dir)
+    enum = intervention.enumerate_candidates(baseline)
+    assert enum["placebo_control"]["object_id"] == "sign_1"
+    assert enum["placebo_control"]["placebo_overlap"] is False
+
+
+def test_non_disjoint_placebo_downgrades_discrimination(tmp_path):
+    """B6 (refiner med): when the ONLY non-hazard placebo is correlated with the core (push_06
+    shape: the only deck object is downstream of the lone rec), the placebo is picked with
+    placebo_overlap=True and a would-be discriminates=True is downgraded to False with
+    reason placebo_overlap — the move cannot be shown hazard-specific rather than 'any
+    suppression collapses the lone rec'."""
+    gt_dir = write_gt_dir(tmp_path)
+    baseline = intervention.intervention_baseline(make_result(), image_data_url="data:img", gt_dir=gt_dir)
+    # person_1 is the only non-hazard AND is downstream of the water core -> non-disjoint.
+    enum = intervention.enumerate_candidates(baseline)
+    assert enum["placebo_control"]["object_id"] == "person_1"
+    assert enum["placebo_control"]["placebo_overlap"] is True
+
+    def vlm(image, prompt, spec):
+        # Core re-routes; placebo stays static -> core would beat the control on raw numbers.
+        if spec.get("intervention_type") == "placebo_null":
+            return {"detected_objects": make_result()["detected_objects"],
+                    "causal_graph": make_result()["causal_graph"],
+                    "recommendations": make_result()["recommendations"], "disaster_level": 8}
+        return _over_reactive_post(make_result()["detected_objects"])
+
+    out = intervention.run_intervention(baseline, {"modality": "language"}, vlm)
+    d = out["discrimination"]
+    assert d["placebo_overlap"] is True
+    assert d["discriminates"] is False
+    assert d["discriminates_downgraded_reason"] == "placebo_overlap"

@@ -61,6 +61,19 @@ U_CUTOFF: float = 0.7
 #: so the OR-escape is tunable without touching the mean gate.
 REC_MOVE_CUTOFF: float = 0.5
 
+#: C2 discrimination noise margin: the core must beat the control by AT LEAST this much on
+#: content_shift to claim `discriminates`. A bare strict `>` lets a razor-thin gap (e.g. live
+#: push_06: core 0.90 vs placebo 0.733, margin 0.167) underwrite a positive grounding read
+#: that is within sampling noise. Parameter; the reflect pass may tune it.
+DISCRIM_MARGIN: float = 0.15
+
+#: C2 absolute control-reactivity ceiling: a placebo / irrelevant control whose own
+#: content_shift is this high is OVER-REACTIVE — it re-routes the graph/recs for a suppression
+#: that should change nothing (the textbook rung-1 signature). When the control is this noisy
+#: the core-vs-control comparison cannot cleanly attribute the core's move to the hazard, so
+#: `discriminates` is voided regardless of the margin. Parameter.
+CONTROL_OVERREACTIVE_CUTOFF: float = 0.5
+
 #: GT answer-key directory + filename pattern, mirroring main.GT_VERIFIED_DIR. Resolved
 #: as a default here so this module needs no top-level `import main`; callers may pass a
 #: tmp `gt_dir` (tests) instead.
@@ -560,7 +573,33 @@ def enumerate_candidates(baseline: dict) -> dict:
         ]
         non_hazards.sort(key=lambda o: str(o.get("object_id", "")))
         if non_hazards:
-            o = non_hazards[0]
+            # B6 (refiner med): mirror the real-hazard control rule — PREFER a placebo whose
+            # downstream-target set in GRAPH A is disjoint from the core's, so the placebo is
+            # demonstrably causally independent, not merely a non-hazard that happens to
+            # collapse the same lone recommendation (e.g. push_06: any deck object suppression
+            # collapses the single drowning rec). The disjointness is computed on Graph A
+            # (model-side, since the placebo is a model object); GT targets do not bind these
+            # ids. If NO non-hazard is disjoint, fall back to the first by id and record
+            # placebo_overlap=True so the discrimination read is downgraded downstream.
+            a_targets = _downstream_targets(graph_a or {})
+            core_a_targets: set = set()
+            if core_oid:
+                core_a_targets = a_targets.get(core_oid, set())
+            disjoint = None
+            for o in non_hazards:
+                oid_o = str(o.get("object_id", "")).strip()
+                o_targets = a_targets.get(oid_o, set())
+                # Disjoint = the placebo shares no downstream target with the core AND the
+                # placebo is itself not a downstream target of the core (not in its rec chain).
+                if not (o_targets & core_a_targets) and oid_o not in core_a_targets:
+                    disjoint = o
+                    break
+            if disjoint is not None:
+                o = disjoint
+                placebo_overlap = False
+            else:
+                o = non_hazards[0]
+                placebo_overlap = True
             placebo_control = {
                 "object_id": str(o.get("object_id", "")).strip(),
                 "state": str(o.get("state", "")),
@@ -570,6 +609,7 @@ def enumerate_candidates(baseline: dict) -> dict:
                 "ranks": {},
                 "is_should_be_core": False,
                 "is_placebo": True,
+                "placebo_overlap": placebo_overlap,
             }
 
     return {
@@ -892,6 +932,14 @@ def check_u_preservation(baseline: dict, post: dict, spec: dict | None = None) -
     ('margin for the single suppressed entity dropping out'). Otherwise suppressing the only
     tracked person in a sparse scene structurally forces u_leaked and the anti-gaming
     masquerade/grounded distinction can never fire for person hazards (B8 dead-on-arrival).
+
+    B8 (refiner med): the discount is GUARDED — it is granted only when the REMAINING
+    (non-target) multiset already overlaps >= U_CUTOFF. The intended single-entity removal
+    earns the discount; a post that ALSO drops/relabels OTHER entities (a wholesale scene
+    re-read on a person arm) does NOT get rescued by the family discount, because the rest of
+    the scene already failed the gate before the discount could apply. Without this guard the
+    discount is granted unconditionally up front and can lift an otherwise-leaked comparison
+    over the cutoff, under-flagging a rung-1 model that re-reads the whole scene.
     """
     base_ms = _label_multiset(baseline or {})
     post_ms = _label_multiset(post or {})
@@ -901,16 +949,22 @@ def check_u_preservation(baseline: dict, post: dict, spec: dict | None = None) -
         target = spec.get("target") or {}
         fam = _canonical_label(target.get("label", "")) or _canonical_label(target.get("object_id", ""))
         if fam:
-            # Discount one unit of the moved target's family from each side (clamped >= 0)
-            # so the intended removal does not count against U.
-            if base_ms.get(fam, 0) > 0:
-                base_ms[fam] -= 1
-                if base_ms[fam] <= 0:
-                    del base_ms[fam]
-            if post_ms.get(fam, 0) > 0:
-                post_ms[fam] -= 1
-                if post_ms[fam] <= 0:
-                    del post_ms[fam]
+            # Build the discounted multisets (one unit of the target family removed from each
+            # side, clamped >= 0) WITHOUT mutating the originals yet.
+            from collections import Counter
+            disc_base: Counter = Counter(base_ms)
+            disc_post: Counter = Counter(post_ms)
+            for ms in (disc_base, disc_post):
+                if ms.get(fam, 0) > 0:
+                    ms[fam] -= 1
+                    if ms[fam] <= 0:
+                        del ms[fam]
+            # Only apply the discount when the REMAINING (non-target) scene already holds:
+            # the family unit may legitimately drop, but the rest must still match. If the
+            # post dropped/relabeled OTHER entities too, the remaining overlap fails and the
+            # discount is withheld so the leak is not masked.
+            if _multiset_overlap(disc_base, disc_post) >= U_CUTOFF:
+                base_ms, post_ms = disc_base, disc_post
 
     overlap = _multiset_overlap(base_ms, post_ms)
 
@@ -943,10 +997,20 @@ def check_do_applied(baseline: dict, post: dict, spec: dict) -> dict:
     failure mode it should expose.
 
     Returns {applied:bool, reason:str, intervention_type:str}. `applied` is True when the
-    do() leaves a detectable mark on its target; False (with reason 'source_persists') when a
-    source_removal/edge_severance target survives unchanged in the post graph. For
-    target_mitigation and placebo_null the persistence test does not apply (the entity is
-    meant to stay in the scene), so `applied` is reported True with reason 'not_checked'.
+    do() leaves a detectable mark on its target; False when the do() was a no-op:
+      - source_removal/edge_severance -> reason 'source_persists' when the suppressed source
+        survives unchanged (hazardous, same state) in the post graph.
+      - target_mitigation (B7 refiner) -> reason 'target_unmoved' when the moved entity is
+        STILL present with its at-risk state intact (the model did not move it to safety).
+        This closes the prior gap where the ENTIRE person_in_hazard class returned
+        'not_checked', leaving target_mitigation scenes with zero do()-application evidence
+        and the core-vs-control read structurally unguarded. The entity legitimately leaving
+        the scene, or its at-risk state clearing, both count as applied.
+      - placebo_null (B7 refiner) -> reason 'placebo_disturbed' when the inert placebo entity
+        did NOT persist UNCHANGED (it should: a placebo is a non-event). A placebo whose state
+        flipped or that vanished means the model treated the null do() as a real intervention,
+        which corrupts the anti-confound baseline. Persisting unchanged -> applied True
+        (reason 'placebo_unchanged').
     Pairs with check_u_preservation: object_overlap=1.0 is only evidence the comparison is
     valid when applied is also True.
     """
@@ -956,24 +1020,55 @@ def check_do_applied(baseline: dict, post: dict, spec: dict) -> dict:
     oid = str(target.get("object_id", "") or "").strip()
     base_state = canonicalize_state(target.get("state", ""))
 
-    if itype not in ("source_removal", "edge_severance") or not oid:
+    if not oid:
         return {"applied": True, "reason": "not_checked", "intervention_type": itype}
 
     post_graph = post.get("graph_a") or {}
     post_nodes = {str(n.get("id", "")).strip(): n for n in (post_graph.get("nodes") or [])}
+    # The target may live only in detected_objects (target_mitigation/placebo entities are
+    # not always hazard nodes); fold those in for the persistence/state read.
+    post_objs = {str(o.get("object_id", "")).strip(): o
+                 for o in (post.get("detected_objects") or [])}
 
-    node = post_nodes.get(oid)
-    if node is None:
-        # The suppressed source is gone from the post graph -> the do() took effect.
-        return {"applied": True, "reason": "source_removed", "intervention_type": itype}
+    if itype in ("source_removal", "edge_severance"):
+        node = post_nodes.get(oid)
+        if node is None:
+            # The suppressed source is gone from the post graph -> the do() took effect.
+            return {"applied": True, "reason": "source_removed", "intervention_type": itype}
+        still_hazardous = bool(node.get("hazardous"))
+        post_state = canonicalize_state(node.get("state", ""))
+        state_unchanged = (post_state == base_state) if base_state else True
+        if still_hazardous and state_unchanged:
+            # Source persists in the post graph with its hazardous state intact: do() ignored.
+            return {"applied": False, "reason": "source_persists", "intervention_type": itype}
+        return {"applied": True, "reason": "state_changed", "intervention_type": itype}
 
-    still_hazardous = bool(node.get("hazardous"))
-    post_state = canonicalize_state(node.get("state", ""))
-    state_unchanged = (post_state == base_state) if base_state else True
-    if still_hazardous and state_unchanged:
-        # Source persists in the post graph with its hazardous state intact: do() ignored.
-        return {"applied": False, "reason": "source_persists", "intervention_type": itype}
-    return {"applied": True, "reason": "state_changed", "intervention_type": itype}
+    if itype == "target_mitigation":
+        # Read the target from the post graph OR detected_objects.
+        node = post_nodes.get(oid) or post_objs.get(oid)
+        if node is None:
+            # The moved target left the scene (moved to safety) -> the do() took effect.
+            return {"applied": True, "reason": "target_removed", "intervention_type": itype}
+        post_state = canonicalize_state(node.get("state", ""))
+        state_unchanged = (post_state == base_state) if base_state else True
+        if state_unchanged:
+            # The at-risk entity is still present in its at-risk state: it was NOT moved.
+            return {"applied": False, "reason": "target_unmoved", "intervention_type": itype}
+        return {"applied": True, "reason": "target_state_changed", "intervention_type": itype}
+
+    if itype == "placebo_null":
+        # A placebo is an inert non-event: the entity MUST persist unchanged. If it vanished
+        # or its state flipped, the model disturbed it and the baseline is corrupted.
+        node = post_nodes.get(oid) or post_objs.get(oid)
+        if node is None:
+            return {"applied": False, "reason": "placebo_disturbed", "intervention_type": itype}
+        post_state = canonicalize_state(node.get("state", ""))
+        state_unchanged = (post_state == base_state) if base_state else True
+        if not state_unchanged:
+            return {"applied": False, "reason": "placebo_disturbed", "intervention_type": itype}
+        return {"applied": True, "reason": "placebo_unchanged", "intervention_type": itype}
+
+    return {"applied": True, "reason": "not_checked", "intervention_type": itype}
 
 
 # ────────────────────────────────────────────────────────────
@@ -1292,6 +1387,14 @@ def compare_to_control(core_run: dict, control_run: dict) -> dict:
     NOT total_shift. Under coherent re-routing structural/semantic deltas are ~0 and would
     dilute total_shift toward the control, masking a real core>control gap. `content_basis`
     records which basis was used; the raw total_shifts are still reported for audit.
+
+    C2 noise gates (two, both must be satisfied for `discriminates` True):
+      - MARGIN: core_content_shift - control_content_shift >= DISCRIM_MARGIN, not a bare `>`.
+        A within-noise gap (live push_06: 0.90 - 0.733 = 0.167) no longer underwrites a claim.
+      - CONTROL OVER-REACTIVITY: when the control's OWN content_shift >= CONTROL_OVERREACTIVE_
+        CUTOFF the control is re-routing for a suppression that should change nothing (rung-1
+        over-reaction). The comparison is then too noisy to attribute the core's move to the
+        hazard, so `discriminates` is False and `control_over_reactive` is stamped True.
     """
     core_run = core_run or {}
     core_sig = core_run.get("signals") or {}
@@ -1300,17 +1403,25 @@ def compare_to_control(core_run: dict, control_run: dict) -> dict:
     if not control_run:
         return {"core_total_shift": core_total, "control_total_shift": None,
                 "core_content_shift": core_shift, "control_content_shift": None,
-                "content_basis": True, "discriminates": None}
+                "content_basis": True, "discriminates": None,
+                "margin": None, "discrim_margin": DISCRIM_MARGIN,
+                "control_over_reactive": None}
     ctrl_sig = control_run.get("signals") or {}
     control_shift = float(ctrl_sig.get("content_shift", ctrl_sig.get("total_shift", 0.0)) or 0.0)
     control_total = float(ctrl_sig.get("total_shift", 0.0) or 0.0)
+    margin = core_shift - control_shift
+    control_over_reactive = control_shift >= CONTROL_OVERREACTIVE_CUTOFF
+    discriminates = (margin >= DISCRIM_MARGIN) and not control_over_reactive
     return {
         "core_total_shift": core_total,
         "control_total_shift": control_total,
         "core_content_shift": core_shift,
         "control_content_shift": control_shift,
         "content_basis": True,
-        "discriminates": core_shift > control_shift,
+        "margin": margin,
+        "discrim_margin": DISCRIM_MARGIN,
+        "control_over_reactive": control_over_reactive,
+        "discriminates": discriminates,
     }
 
 
@@ -1370,6 +1481,24 @@ def _run_one(baseline: dict, candidate: dict, selections: dict, vlm_fn: Callable
     signals = compute_shifts(baseline, post, spec)
     return {"spec": spec, "u_check": u_check, "do_applied": do_applied, "signals": signals,
             "post": post, "suppression_statement": rendered["suppression_statement"]}
+
+
+def _stamp_u_compliance_only(u_check: dict, do_applied: dict | None) -> None:
+    """B7 (refiner med): mark when a high object_overlap is a COMPLIANCE indicator, not an
+    independent leak test.
+
+    Under EMBED-BASELINE the do()-prompt hands the model its exact prior ids and orders it to
+    'REUSE these exact object_ids verbatim', so a verbatim echo (raw_id_overlap == 1.0)
+    trivially passes the U gate WITHOUT proving the model independently held U fixed. When
+    the do()-applied guard ALSO could not falsify the do() (reason 'not_checked'), the U pass
+    certifies almost nothing: stamp `u_compliance_only` True so a reader does not read
+    overlap == 1.0 as 'U independently verified held'. Mutates u_check in place.
+    """
+    if not isinstance(u_check, dict):
+        return
+    reason = (do_applied or {}).get("reason")
+    raw = u_check.get("raw_id_overlap")
+    u_check["u_compliance_only"] = bool(raw == 1.0 and reason == "not_checked")
 
 
 def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict:
@@ -1459,6 +1588,7 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
     else:
         core_basis = None
     core = _run_one(baseline, target, selections, vlm_fn, role="core", core_basis=core_basis)
+    _stamp_u_compliance_only(core["u_check"], core.get("do_applied"))
     core_verdict = adjudicate_groundedness(core["spec"], core["signals"], enum)
     u_leaked = bool(core["u_check"].get("leaked"))
 
@@ -1593,6 +1723,7 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
         # explicit intervention_type override. role='control' (the control arm, R3).
         ctrl_selections = {"modality": selections.get("modality", "language")}
         control_run = _run_one(baseline, control_cand, ctrl_selections, vlm_fn, role="control")
+        _stamp_u_compliance_only(control_run["u_check"], control_run.get("do_applied"))
         control_verdict = adjudicate_groundedness(control_run["spec"], control_run["signals"], enum)
         if control_run["u_check"].get("leaked"):
             control_verdict = {
@@ -1650,6 +1781,17 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
     discrimination["control_overlap"] = control_overlap
     discrimination["has_real_hazard_control"] = (
         control_run is not None and not control_is_placebo)
+    # B6 (refiner med): when a PLACEBO control was used, surface whether it is causally
+    # disjoint from the core (placebo_overlap False) or shares the core's downstream targets
+    # (placebo_overlap True — e.g. push_06, where the only deck object is downstream of the
+    # lone drowning rec). A non-disjoint placebo cannot prove the core's move was hazard-
+    # SPECIFIC rather than 'any suppression collapses the lone rec', so discrimination off it
+    # is downgraded the same way an over-reactive control is.
+    placebo_overlap = bool(control_is_placebo and (control_cand or {}).get("placebo_overlap"))
+    discrimination["placebo_overlap"] = placebo_overlap if control_is_placebo else None
+    if placebo_overlap and discrimination.get("discriminates") is True:
+        discrimination["discriminates"] = False
+        discrimination["discriminates_downgraded_reason"] = "placebo_overlap"
     # C4: discrimination is void-aware. If EITHER arm leaked U, no valid comparison exists
     # on that arm, so the raw shift numbers are noise — refuse a true/false `discriminates`
     # verdict off a void (a reader must not read "does not discriminate" as masquerade
@@ -1689,6 +1831,23 @@ def run_intervention(baseline: dict, selections: dict, vlm_fn: Callable) -> dict
         )
     else:
         core_verdict["discrimination_caveat"] = False
+
+    # ── C4 (refiner med): when the suppressed core arm was NEVER the GT core — either the
+    # model never perceived the GT core (gt_core_unobserved) or it ran on a declared,
+    # un-GT-confirmed core (core_not_declared) — then `discriminates` cannot be read as
+    # evidence of GROUNDEDNESS, because no arm ever touched the actual should-be-core hazard.
+    # A reader scanning the discrimination block alone would otherwise see discriminates=True
+    # sitting next to a verdict that says groundedness 'cannot be adjudicated'. Stamp the
+    # block so it cannot be mistaken for a grounding signal, and null the bare bool.
+    _cell = core_verdict.get("cell")
+    if _cell == "gt_core_unobserved" or core_verdict.get("core_not_declared"):
+        discrimination["not_a_grounding_signal"] = True
+        discrimination["not_a_grounding_reason"] = (
+            "gt_core_unobserved" if _cell == "gt_core_unobserved" else "core_not_declared")
+        discrimination["discriminates_raw"] = discrimination.get("discriminates")
+        discrimination["discriminates"] = None
+    else:
+        discrimination["not_a_grounding_signal"] = False
 
     return {
         "baseline": _baseline_summary(baseline),
