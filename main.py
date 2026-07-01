@@ -9171,30 +9171,40 @@ def make_gate_false_negative_card(report: dict[str, Any]) -> html.Div:
     )
 
 
-def make_candidates_panel(candidates: dict[str, Any], trust: dict[str, Any]) -> html.Div:
-    """First card of the Intervention tab: the suppression candidates + baseline
-    trust context.
+def make_candidates_panel(
+    candidates: dict[str, Any],
+    trust: dict[str, Any],
+    detected_objects: list[dict[str, Any]] | None = None,
+    image_contents: str | None = None,
+    framework_picks: list[dict[str, Any]] | None = None,
+    vlm_pick: dict[str, Any] | None = None,
+) -> html.Div:
+    """First card of the Intervention tab: baseline trust, the hazards that could be
+    suppressed, and the three picks of which hazard is the one to suppress first.
 
-    Shows (1) pre-intervention trust as a context line colored by level, noting
-    that low trust qualifies the intervention read; (2) the candidate hazards with
-    their role clearly labeled — should-be-core (GT), declared core A (recs-
-    coupled), declared core B (independent graph), and the control — each with
-    source badges (A/B/GT) and a distinct badge on the should-be-core one.
+    Plain-language redesign:
+      1. A compact baseline-trust line, colored by level (low reads "provisional").
+      2. Every detected suppression-candidate hazard as an interactive chip that
+         shows its cropped bbox on hover (reuses make_entity_chip).
+      3. The three picks of the core hazard, grouped under plain headers:
+           - What the model says (neither is mechanistic):
+               • Algorithm pick — top of framework_suppression_picks (rule-based rank)
+               • VLM pick        — graph_b.suppression_pick
+           - Ground truth:
+               • GT pick — the enumerate should_be_core; amber "never perceived" note
+                 when the model never saw the GT core; "unavailable" when there is no GT.
+         Each pick's hazard renders as a hover-bbox chip, plus one at-a-glance
+         agreement line across the three picks.
 
-    Edge cases handled: (a) no should-be-core but a GT core the model never
-    perceived → an amber warning row; (b) no independent control → a muted note.
-
-    Pure: builds Dash components from the saved `candidates` dict and baseline
-    `trust` dict, no callbacks.
+    No jargon: no "A#1", no "should-be-core", no "control".
     """
     candidates = candidates or {}
     trust = trust or {}
+    detected_objects = detected_objects or []
+    framework_picks = framework_picks or []
+    vlm_pick = vlm_pick or {}
 
     # ---- Empty/placeholder guard --------------------------------------------
-    # On the PLACEHOLDER (no scene run yet) the candidates dict carries no
-    # should-be-core, no declared cores, no control, no gt_core_unobserved, and
-    # an empty candidates list. Render a short empty-state rather than a bare or
-    # broken card.
     if not (
         candidates.get("should_be_core")
         or candidates.get("declared_core_a")
@@ -9208,10 +9218,32 @@ def make_candidates_panel(candidates: dict[str, Any], trust: dict[str, Any]) -> 
             className="empty-state",
         )
 
-    # ---- Trust context line (colored by level; low trust qualifies the read) ---
+    _LEVEL_COLOR = {"high": "#15803d", "moderate": "#b45309", "low": "#b91c1c"}
+
+    # ---- bbox lookup: object_id -> detected_objects entry (carries bbox) -----
+    by_oid: dict[str, dict[str, Any]] = {}
+    for o in detected_objects:
+        oid = str(o.get("object_id", "")).strip()
+        if oid:
+            by_oid[oid] = o
+
+    def hazard_chip(oid: str | None, fallback_label: str = "", fallback_state: str = ""):
+        """A hover-bbox chip for a hazard by object_id (reuses the recommendation-card
+        pill + cropped-bbox tooltip). Falls back to a plain pill when the object has
+        no detected_objects entry (so no bbox crop is available)."""
+        oid = (oid or "").strip()
+        obj = by_oid.get(oid)
+        if obj is not None:
+            return make_entity_chip(image_contents, obj, is_hazardous=True)
+        # No bbox to crop: render a plain (non-hover) pill so the pick still reads.
+        lbl = fallback_label or oid or "?"
+        state = fallback_state or "unknown"
+        return html.Span(f"{lbl} ({state})", className="pill threat")
+
+    # ---- (1) Baseline-trust line --------------------------------------------
     level = str(trust.get("level", "unknown"))
     score = trust.get("score", None)
-    level_color = {"high": "#15803d", "moderate": "#b45309", "low": "#b91c1c"}.get(level, "#64748b")
+    level_color = _LEVEL_COLOR.get(level, "#64748b")
     score_txt = f"{float(score):.2f}" if isinstance(score, (int, float)) else "?"
     trust_children = [
         html.Span("Baseline trust: ", style={"color": "#475569"}),
@@ -9220,171 +9252,150 @@ def make_candidates_panel(candidates: dict[str, Any], trust: dict[str, Any]) -> 
     ]
     if level == "low":
         trust_children.append(
-            html.Span(" — low trust qualifies the intervention read; treat the "
-                      "groundedness verdict as provisional.",
+            html.Span(" — treat what follows as provisional.",
                       style={"color": "#b91c1c", "fontStyle": "italic"}))
     elif level == "moderate":
         trust_children.append(
-            html.Span(" — moderate trust; read the intervention verdict as provisional.",
+            html.Span(" — read the picks as provisional.",
                       style={"color": "#b45309", "fontStyle": "italic"}))
     trust_line = html.Div(trust_children,
                           style={"fontSize": "12px", "marginBottom": "12px"})
 
-    # ---- Source badge helper -------------------------------------------------
-    _SRC_COLOR = {"A": "#0e7490", "B": "#7c3aed", "GT": "#15803d"}
+    # ---- (2) All candidate hazards as hover-bbox chips ----------------------
+    cand_list = candidates.get("candidates") or []
+    hazard_chips: list = []
+    seen: set = set()
+    for c in cand_list:
+        oid = str(c.get("object_id", "")).strip()
+        if not oid or oid in seen:
+            continue
+        seen.add(oid)
+        hazard_chips.append(hazard_chip(oid, c.get("label", ""), c.get("state", "")))
+    hazards_block = html.Div(
+        [
+            html.Div("Hazards that could be suppressed",
+                     style={"fontSize": "11px", "fontWeight": 700, "color": "#475569",
+                            "marginBottom": "4px"}),
+            html.Div("Hover any hazard to see its location in the scene.",
+                     style={"fontSize": "10px", "color": "#94a3b8", "marginBottom": "6px"}),
+            html.Div(hazard_chips if hazard_chips
+                     else [html.Span("No hazards detected.", style={"fontSize": "12px",
+                                                                    "color": "#94a3b8"})],
+                     style={"display": "flex", "flexWrap": "wrap", "gap": "6px",
+                            "alignItems": "center"}),
+        ],
+        style={"marginBottom": "14px"})
 
-    def source_badges(srcs: list[str], ranks: dict[str, Any] | None = None) -> list:
-        ranks = ranks or {}
-        out = []
-        for s in (srcs or []):
-            r = ranks.get(s)
-            txt = f"{s}#{r}" if r is not None else s
-            out.append(html.Span(
-                txt,
-                title={"A": "declared core A (recs-coupled)",
-                       "B": "declared core B (independent graph)",
-                       "GT": "ground truth"}.get(s, s),
-                style={"display": "inline-block", "fontSize": "10px", "fontWeight": 700,
-                       "color": "#fff", "background": _SRC_COLOR.get(s, "#64748b"),
-                       "borderRadius": "4px", "padding": "1px 6px", "marginLeft": "4px"}))
-        if not out:
-            out.append(html.Span("—", style={"fontSize": "10px", "color": "#94a3b8",
-                                             "marginLeft": "4px"}))
-        return out
+    # ---- (3) The three picks ------------------------------------------------
+    # Resolve each pick's hazard object_id + display fields.
+    algo_pick = framework_picks[0] if framework_picks else None
+    algo_oid = str((algo_pick or {}).get("threat", "")).strip() or None
+    algo_state = str((algo_pick or {}).get("state", "")).strip()
 
-    def cand_desc(c: dict[str, Any]) -> str:
-        oid = c.get("object_id", "?")
-        st = c.get("state", "")
-        lab = c.get("label", "")
-        base = f"{oid}"
-        if st:
-            base += f" / {st}"
-        if lab and lab != oid:
-            base += f" ({lab})"
-        return base
+    vlm_oid = str((vlm_pick or {}).get("threat", "")).strip() or None
+    vlm_state = str((vlm_pick or {}).get("state", "")).strip()
 
-    def role_row(role_label: str, role_hint: str, cand: dict[str, Any] | None,
-                 is_core: bool = False) -> html.Div:
-        left = html.Div(
-            [
-                html.Div(role_label, style={"fontWeight": 700, "fontSize": "12px",
-                                            "color": "#334155"}),
-                html.Div(role_hint, style={"fontSize": "10px", "color": "#94a3b8"}),
-            ],
-            style={"minWidth": "160px"})
-        if cand is None:
-            right = html.Div("—", style={"fontSize": "12px", "color": "#94a3b8"})
-        else:
-            badge_row = source_badges(cand.get("sources", []), cand.get("ranks", {}))
-            core_badge = []
-            if is_core or cand.get("is_should_be_core"):
-                core_badge = [html.Span(
-                    "SHOULD-BE-CORE",
-                    style={"display": "inline-block", "fontSize": "9px", "fontWeight": 800,
-                           "letterSpacing": "0.4px", "color": "#15803d",
-                           "border": "1px solid #15803d", "borderRadius": "4px",
-                           "padding": "1px 5px", "marginLeft": "8px"})]
-            right = html.Div(
-                [html.Span(cand_desc(cand), style={"fontSize": "12px", "color": "#0f172a",
-                                                   "fontWeight": 600}),
-                 *core_badge, html.Span(badge_row, style={"marginLeft": "2px"})],
-                style={"display": "flex", "alignItems": "center", "flexWrap": "wrap"})
+    should_be_core = candidates.get("should_be_core")
+    gt_unobs = candidates.get("gt_core_unobserved")
+    gt_oid = str((should_be_core or {}).get("object_id", "")).strip() or None
+
+    def pick_row(header: str, hint: str, body) -> html.Div:
         return html.Div(
-            [left, right],
+            [
+                html.Div(
+                    [html.Div(header, style={"fontWeight": 700, "fontSize": "12px",
+                                             "color": "#334155"}),
+                     html.Div(hint, style={"fontSize": "10px", "color": "#94a3b8"})],
+                    style={"minWidth": "150px"}),
+                html.Div(body, style={"display": "flex", "alignItems": "center",
+                                      "flexWrap": "wrap", "gap": "6px"}),
+            ],
             style={"display": "flex", "gap": "12px", "alignItems": "flex-start",
                    "padding": "6px 0", "borderTop": "1px solid #f1f5f9"})
 
-    should_be_core = candidates.get("should_be_core")
-    declared_a = candidates.get("declared_core_a")
-    declared_b = candidates.get("declared_core_b")
-    control = candidates.get("control")
-    gt_unobs = candidates.get("gt_core_unobserved")
+    # Algorithm pick
+    if algo_oid is not None:
+        algo_body = hazard_chip(algo_oid, "", algo_state)
+    else:
+        algo_body = html.Span("no pick", style={"fontSize": "12px", "color": "#94a3b8",
+                                                "fontStyle": "italic"})
+    # VLM pick
+    if vlm_oid is not None:
+        vlm_body = hazard_chip(vlm_oid, "", vlm_state)
+    else:
+        vlm_body = html.Span("no pick", style={"fontSize": "12px", "color": "#94a3b8",
+                                               "fontStyle": "italic"})
 
-    # Dedupe the declaration roles BY object_id: when should-be-core, declared A,
-    # and declared B name the SAME hazard, the agreement is already shown by the
-    # source badges (A#n/B#n/GT#n) on a single row — three near-identical rows
-    # (each stamped SHOULD-BE-CORE) are redundant and misleading. Merge them into
-    # one distinct-candidate row per object_id, consolidating the roles into the
-    # hint line and stamping SHOULD-BE-CORE only on the actual should-be-core.
-    def _oid(c: dict[str, Any] | None) -> str | None:
-        return c.get("object_id") if c else None
+    declarative_block = html.Div(
+        [
+            html.Div("What the model says",
+                     style={"fontSize": "11px", "fontWeight": 800, "letterSpacing": "0.3px",
+                            "color": "#64748b", "textTransform": "uppercase",
+                            "marginBottom": "2px"}),
+            html.Div("Both are the model's own claims (declarations, not ground truth).",
+                     style={"fontSize": "10px", "color": "#94a3b8", "marginBottom": "4px"}),
+            pick_row("Algorithm pick", "ranked from the model's causal graph", algo_body),
+            pick_row("VLM pick", "the model's own first choice to suppress", vlm_body),
+        ],
+        style={"marginBottom": "12px"})
 
-    sbc_oid = _oid(should_be_core)
-    a_oid = _oid(declared_a)
-    b_oid = _oid(declared_b)
-
-    def merged_hint(oid: str | None) -> str:
-        parts = []
-        if oid is not None and oid == sbc_oid:
-            parts.append("ground-truth core")
-        if oid is not None and oid == a_oid:
-            parts.append("declared by recs (A)")
-        if oid is not None and oid == b_oid:
-            parts.append("declared by independent graph (B)")
-        return " · ".join(parts) if parts else "declared core"
-
-    rows: list = []
-
-    # should-be-core (GT) OR the amber "never perceived" warning row
+    # Ground-truth pick
     if should_be_core is not None:
-        rows.append(role_row("Should-be-core", merged_hint(sbc_oid),
-                             should_be_core, is_core=True))
+        gt_body = hazard_chip(gt_oid, should_be_core.get("label", ""),
+                              should_be_core.get("state", ""))
     elif gt_unobs is not None:
-        lab = gt_unobs.get("label", "?")
-        st = gt_unobs.get("state", "")
-        oid = gt_unobs.get("object_id", "")
-        desc = f"{oid} / {st} ({lab})" if st else f"{lab}"
-        rows.append(html.Div(
-            [
-                html.Div(
-                    [html.Div("⚠ GT core the model never perceived",
-                              style={"fontWeight": 800, "fontSize": "12px", "color": "#b45309"}),
-                     html.Div("perception miss — cannot be adjudicated as a reasoning verdict",
-                              style={"fontSize": "10px", "color": "#b45309"})],
-                    style={"minWidth": "160px"}),
-                html.Div(desc, style={"fontSize": "12px", "fontWeight": 700, "color": "#b45309"}),
-            ],
-            style={"display": "flex", "gap": "12px", "alignItems": "flex-start",
-                   "padding": "8px 10px", "margin": "4px 0", "borderRadius": "6px",
-                   "background": "#fffbeb", "border": "1px solid #fcd34d"}))
+        gt_lab = gt_unobs.get("label", "?")
+        gt_body = html.Span(
+            f"the model never perceived the ground-truth core: {gt_lab}",
+            style={"fontSize": "12px", "fontWeight": 700, "color": "#b45309"})
     else:
-        rows.append(role_row("Should-be-core", "ground-truth core hazard", None))
+        gt_body = html.Span("GT pick unavailable",
+                            style={"fontSize": "12px", "color": "#94a3b8",
+                                   "fontStyle": "italic"})
 
-    # Track object_ids already displayed so each DISTINCT hazard renders once.
-    shown_oids: set = set()
-    if should_be_core is not None and sbc_oid is not None:
-        shown_oids.add(sbc_oid)
+    gt_block = html.Div(
+        [
+            html.Div("Ground truth",
+                     style={"fontSize": "11px", "fontWeight": 800, "letterSpacing": "0.3px",
+                            "color": "#15803d", "textTransform": "uppercase",
+                            "marginBottom": "2px"}),
+            pick_row("GT pick", "the verified answer key", gt_body),
+        ],
+        style={"marginBottom": "10px"})
 
-    # Declared A / B: only render a row when it names a hazard not already shown
-    # (otherwise its A#/B# badge is already visible on the merged row above).
-    if declared_a is not None and a_oid not in shown_oids:
-        rows.append(role_row("Declared core A", merged_hint(a_oid), declared_a))
-        shown_oids.add(a_oid)
-    if declared_b is not None and b_oid not in shown_oids:
-        rows.append(role_row("Declared core B", merged_hint(b_oid), declared_b))
-        shown_oids.add(b_oid)
-
-    if control is not None:
-        rows.append(role_row("Control", "off-core comparison arm", control))
+    # ---- At-a-glance agreement line -----------------------------------------
+    decl_agree = (algo_oid is not None and algo_oid == vlm_oid)
+    if should_be_core is not None and gt_oid is not None:
+        if decl_agree and algo_oid == gt_oid:
+            agree_txt, agree_color = "All three agree.", "#15803d"
+        elif decl_agree:
+            agree_txt, agree_color = (
+                "The two model picks agree, but differ from ground truth.", "#b45309")
+        else:
+            agree_txt, agree_color = "Picks diverge.", "#b91c1c"
     else:
-        rows.append(html.Div(
-            [
-                html.Div([html.Div("Control", style={"fontWeight": 700, "fontSize": "12px",
-                                                     "color": "#94a3b8"}),
-                          html.Div("off-core comparison arm", style={"fontSize": "10px",
-                                                                     "color": "#cbd5e1"})],
-                         style={"minWidth": "160px"}),
-                html.Div("no independent control available",
-                         style={"fontSize": "12px", "color": "#94a3b8", "fontStyle": "italic"}),
-            ],
-            style={"display": "flex", "gap": "12px", "alignItems": "flex-start",
-                   "padding": "6px 0", "borderTop": "1px solid #f1f5f9"}))
+        if decl_agree:
+            agree_txt, agree_color = (
+                "The two model picks agree (no ground truth to compare against).", "#64748b")
+        else:
+            agree_txt, agree_color = (
+                "The two model picks diverge (no ground truth to compare against).", "#64748b")
+    agree_line = html.Div(
+        agree_txt,
+        style={"fontSize": "12px", "fontWeight": 700, "color": agree_color,
+               "marginTop": "6px", "paddingTop": "8px", "borderTop": "1px solid #e2e8f0"})
 
     return html.Div(
         [
             html.Div("Suppression candidates & trust context", className="trust-section-label"),
             trust_line,
-            html.Div(rows, style={"marginTop": "2px"}),
+            hazards_block,
+            html.Div("Which hazard is the one to suppress first?",
+                     style={"fontSize": "11px", "fontWeight": 700, "color": "#475569",
+                            "marginBottom": "6px"}),
+            declarative_block,
+            gt_block,
+            agree_line,
         ],
         className="trust-synthesis-card candidates-panel",
     )
@@ -15079,7 +15090,14 @@ def render_intervention_candidates(data, image_contents):
         import intervention
         baseline = intervention.intervention_baseline(normalized, image_contents, gt_dir=GT_VERIFIED_DIR)
         cand = intervention.enumerate_candidates(baseline)
-        return make_candidates_panel(cand, baseline.get("trust", {}) or {})
+        return make_candidates_panel(
+            cand,
+            baseline.get("trust", {}) or {},
+            normalized.get("detected_objects") or [],
+            image_contents,
+            normalized.get("framework_suppression_picks") or [],
+            (normalized.get("graph_b", {}) or {}).get("suppression_pick") or {},
+        )
     except Exception as exc:
         return html.Div("Suppression candidates unavailable for this run.", className="empty-state")
 
