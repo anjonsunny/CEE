@@ -49,7 +49,8 @@ RESULT_PANEL_IDS = [
     "pre-trust-card",
     "pathology-card",
     "gt-validation-card",
-    "suppression-card",
+    # "suppression-card" retired — legacy rule-based picks now live inside the
+    # Intervention tab's redesigned candidates card (intervention-candidates-card).
     "sec-reasoning-meaning",
     "sec-conformance-meaning",
     "sec-pathology-meaning",

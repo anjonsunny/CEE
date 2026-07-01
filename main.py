@@ -12002,11 +12002,11 @@ def serve_layout():
                                             children=[
                                                 html.Div(
                                                     className="result-row",
-                                                    children=[card("Suppression Candidates", "intervention-candidates-card", "wide full-row")],
+                                                    children=[card("Scene", "intervention-scene-image", "wide full-row")],
                                                 ),
                                                 html.Div(
                                                     className="result-row",
-                                                    children=[card("Rule-based picks (Graph A) — legacy", "suppression-card", "wide full-row")],
+                                                    children=[card("Suppression Candidates", "intervention-candidates-card", "wide full-row")],
                                                 ),
                                                 html.Div(
                                                     className="result-row",
@@ -14939,7 +14939,6 @@ def analyze_scene(
     Output("pre-trust-card", "children"),
     Output("pathology-card", "children"),
     Output("gt-validation-card", "children"),
-    Output("suppression-card", "children"),
     Output("sec-reasoning-meaning", "children"),
     Output("sec-conformance-meaning", "children"),
     Output("sec-pathology-meaning", "children"),
@@ -15071,12 +15070,27 @@ def render_results(
         pre_trust_view,
         pathology_view,
         gt_validation_view,
-        suppression_view,
         reasoning_meaning,
         conformance_meaning,
         pathology_meaning,
         accuracy_meaning,
     )
+
+
+@app.callback(
+    Output("intervention-scene-image", "children"),
+    Input("analysis-store", "data"),
+    State("image-upload", "contents"),
+)
+def render_intervention_scene_image(data, image_contents):
+    try:
+        normalized = normalize_result(data, image_contents)
+        overlay = make_overlay_preview(image_contents, normalized.get("detected_objects") or [])
+        if not overlay:
+            return html.Div("Upload a scene to see the image.", className="empty-state")
+        return html.Img(src=overlay, style={"maxWidth": "100%", "borderRadius": "8px", "display": "block"})
+    except Exception:
+        return html.Div("Scene image unavailable.", className="empty-state")
 
 
 @app.callback(
