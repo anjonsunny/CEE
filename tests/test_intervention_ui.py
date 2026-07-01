@@ -46,6 +46,16 @@ def test_candidates_panel_dedups_and_badges_once(main_module):
 
 
 @pytest.mark.blocking
+def test_intervention_candidates_callback_placeholder_is_safe(main_module):
+    """Part 1 wiring: the live callback (render_intervention_candidates) degrades to a
+    safe Div on the placeholder result (no crash, no exception escaping the try/except).
+    The populated path is covered by the harness/screenshot loop against saved runs."""
+    m = main_module
+    out = m.render_intervention_candidates(m.PLACEHOLDER_RESULT, None)
+    assert out is not None and out.__class__.__name__ == "Div"
+
+
+@pytest.mark.blocking
 def test_candidates_panel_gt_core_unobserved_and_no_control(main_module):
     """Part 1 edge: should_be_core None + gt_core_unobserved set -> amber 'never
     perceived' row and NO should-be-core badge; control None -> no-control note."""

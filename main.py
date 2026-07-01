@@ -9190,6 +9190,24 @@ def make_candidates_panel(candidates: dict[str, Any], trust: dict[str, Any]) -> 
     candidates = candidates or {}
     trust = trust or {}
 
+    # ---- Empty/placeholder guard --------------------------------------------
+    # On the PLACEHOLDER (no scene run yet) the candidates dict carries no
+    # should-be-core, no declared cores, no control, no gt_core_unobserved, and
+    # an empty candidates list. Render a short empty-state rather than a bare or
+    # broken card.
+    if not (
+        candidates.get("should_be_core")
+        or candidates.get("declared_core_a")
+        or candidates.get("declared_core_b")
+        or candidates.get("control")
+        or candidates.get("gt_core_unobserved")
+        or candidates.get("candidates")
+    ):
+        return html.Div(
+            "Run a scene to see suppression candidates.",
+            className="empty-state",
+        )
+
     # ---- Trust context line (colored by level; low trust qualifies the read) ---
     level = str(trust.get("level", "unknown"))
     score = trust.get("score", None)
@@ -11973,7 +11991,11 @@ def serve_layout():
                                             children=[
                                                 html.Div(
                                                     className="result-row",
-                                                    children=[card("Suppression Candidates", "suppression-card", "wide full-row")],
+                                                    children=[card("Suppression Candidates", "intervention-candidates-card", "wide full-row")],
+                                                ),
+                                                html.Div(
+                                                    className="result-row",
+                                                    children=[card("Rule-based picks (Graph A) — legacy", "suppression-card", "wide full-row")],
                                                 ),
                                                 html.Div(
                                                     className="result-row",
@@ -15044,6 +15066,22 @@ def render_results(
         pathology_meaning,
         accuracy_meaning,
     )
+
+
+@app.callback(
+    Output("intervention-candidates-card", "children"),
+    Input("analysis-store", "data"),
+    State("image-upload", "contents"),
+)
+def render_intervention_candidates(data, image_contents):
+    try:
+        normalized = normalize_result(data, image_contents)
+        import intervention
+        baseline = intervention.intervention_baseline(normalized, image_contents, gt_dir=GT_VERIFIED_DIR)
+        cand = intervention.enumerate_candidates(baseline)
+        return make_candidates_panel(cand, baseline.get("trust", {}) or {})
+    except Exception as exc:
+        return html.Div("Suppression candidates unavailable for this run.", className="empty-state")
 
 
 @app.callback(

@@ -954,6 +954,10 @@ workflow; `tests/test_intervention.py` (74 tests) is the hermetic eval-for-code.
 - **Why:** three near-identical rows each stamped SHOULD-BE-CORE was redundant and misleading; agreement belongs on the badges, not on repeated rows.
 - **Severity:** BLOCKING. **Status:** manual (render + text-flatten check on both JSONs).
 
+### I7 — Candidates card wired into the live Intervention tab (UI)
+- **What:** a dedicated callback `render_intervention_candidates(analysis-store, image-upload)` computes `intervention_baseline → enumerate_candidates` from the current single-run result (no VLM; GT loaded by filename) and renders `make_candidates_panel` into the `intervention-candidates-card` on tab 3 — so a single run populates the card. Wrapped in try/except → a safe "unavailable" Div on any error; the PLACEHOLDER result degrades to the empty-state Div. `test_intervention_candidates_callback_placeholder_is_safe` locks the placeholder path; the populated path is verified via the harness/screenshot loop on saved runs. The legacy rule-based `suppression-card` was retitled "Rule-based picks (Graph A) — legacy" to avoid a duplicate title (removal deferred, as its Output is in the multi-output `render_results`).
+- **Severity:** BLOCKING. **Status:** auto (placeholder) + manual (live populated render).
+
 ### I4 — Deferred / to confirm in loop step 2 (live)
 - **A6 (open):** the `compare_graphs` reuse path (lazy `import main`) is NOT exercised hermetically (import main raises in the test env); must confirm it runs in the live push_06 pass.
 - Experiment-eval (Section C: U held, discrimination, trust qualifies, interpretability) is validated on the live run, not in this hermetic suite.
