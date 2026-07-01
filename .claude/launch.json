@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "intervention-ui",
+      "runtimeExecutable": "/Users/sunny/miniconda3/envs/clip_dash/bin/python",
+      "runtimeArgs": ["intervention_ui_harness.py"],
+      "port": 8051
+    }
+  ]
+}

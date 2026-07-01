@@ -918,7 +918,7 @@ Validated against the 9 captured shakedown runs (`tests/fixtures/run_outputs/sha
 
 The counterfactual suppression pipeline that adjudicates *operative core* (does the
 recommendation move when the hazard is suppressed?). Built via the agentic reflection
-workflow; `tests/test_intervention.py` (33 tests) is the hermetic eval-for-code. See
+workflow; `tests/test_intervention.py` (74 tests) is the hermetic eval-for-code. See
 `INTERVENTION_PLAN.md` + `INTERVENTION_WORKFLOW.md`.
 
 ### I1 — Step spine invariants
@@ -938,6 +938,21 @@ workflow; `tests/test_intervention.py` (33 tests) is the hermetic eval-for-code.
   - **Disjoint control (B6):** control prefers a target-disjoint hazard. `test_control_prefers_target_disjoint_hazard`.
 - **Why:** demonstrates the reflection loop's value — independent test-author + adversarial critics caught a GT-id leak, wording-based shift, and a cosmetic U-guard that a single-agent build would have shipped.
 - **Severity:** BLOCKING. **Status:** auto.
+
+### I5 — Live-pass refiner fixes (push_03 single-hazard edge case)
+- **What:** findings the live run surfaced that the hermetic v1 missed, now locked:
+  - **Discrimination fed back into the verdict (C4/C2/B8/B9):** when a control ran, the comparison is valid, `discriminates` is False, and the cell is grounded/spurious_grounding, the core verdict carries `discrimination_caveat=True` and the explanation is downgraded to "moved but did NOT beat the control — grounding UNCONFIRMED". An over-reactive rung-1 model that re-routes for ANY suppression no longer reads as an unqualified 'grounded'. `test_over_reactive_model_grounded_is_caveated`, `test_grounded_when_core_beats_control_has_no_caveat`.
+  - **One basis for the move gate (B2):** `moved` is gated on `content_shift` (mean of hazard+graph+recommendation), the SAME basis as discrimination, not the diluted `total_shift` (mean of 5). Removes the split that let one run be simultaneously 'masquerade' and 'discriminating'. `test_move_gate_uses_content_shift_not_diluted_total`.
+  - **Suppressed-self excluded from recommendation_shift (B3):** removing the suppressed object's own id from rec quads on both sides so a mechanical "the target vanished" does not auto-fire the rec signal; a moved placebo cell is annotated `placebo_not_a_finding`. `test_recommendation_shift_excludes_suppressed_target_self`, `test_placebo_moved_cell_is_annotated_not_a_real_finding`.
+  - **Placebo gets a neutral do() (B6):** placebo candidates route to `placebo_null` ("plays no causal role"), never a destructive `source_removal`; discrimination reports `has_real_hazard_control` independently of `control_overlap`. `test_placebo_spec_uses_neutral_do_not_source_removal`, `test_has_real_hazard_control_false_for_placebo_only_scene`.
+  - **do()-applied guard (B5/B7):** for source_removal/edge_severance, if the suppressed source persists unchanged in the post graph the do() was a no-op → `check_do_applied` returns applied=False/`source_persists`, the core verdict carries `do_not_applied=True`. U-preservation no longer certifies a comparison where the do() was ignored. `test_do_applied_false_when_source_persists_unchanged`, `test_do_applied_true_when_source_state_changes`, `test_run_intervention_flags_do_not_applied`.
+- **Why:** the hermetic oracle proved implementation validity but missed the over-reactive masquerade (core and placebo move identically) and the EMBED-BASELINE echo (do() ignored, U passes) — both only visible end-to-end. The contract (`INTERVENTION_WORKFLOW.md` rule #7 + data-shapes) was amended for the placebo extension in the same pass (A1).
+- **Severity:** BLOCKING. **Status:** auto.
+
+### I6 — Candidates panel dedupes agreeing declarations by object_id (UI)
+- **What:** `make_candidates_panel` (Intervention tab, first card) renders each DISTINCT candidate hazard ONCE, keyed by `object_id`. When should_be_core, declared_core_a, and declared_core_b name the SAME hazard (declarations agree), it renders a single row whose source badges (A#n/B#n/GT#n) convey the agreement and whose hint consolidates the roles ("ground-truth core · declared by recs (A) · declared by independent graph (B)"); the SHOULD-BE-CORE badge appears on exactly the should-be-core row. The control renders as its own distinct row (different object_id). Verified against saved JSONs: **push_34** (building_1 = should-be-core + A + B; debris_1 = control) → ONE building_1 row, exactly ONE SHOULD-BE-CORE badge, plus a separate debris_1 control row; **push_06** (should_be_core None, gt_core_unobserved water_1, declared_core_b person_1, control None) → amber "GT core the model never perceived" row + person_1 row + "no independent control available" note, zero SHOULD-BE-CORE badges (UNCHANGED edge cases).
+- **Why:** three near-identical rows each stamped SHOULD-BE-CORE was redundant and misleading; agreement belongs on the badges, not on repeated rows.
+- **Severity:** BLOCKING. **Status:** manual (render + text-flatten check on both JSONs).
 
 ### I4 — Deferred / to confirm in loop step 2 (live)
 - **A6 (open):** the `compare_graphs` reuse path (lazy `import main`) is NOT exercised hermetically (import main raises in the test env); must confirm it runs in the live push_06 pass.
